@@ -44,6 +44,10 @@ If Strava provider cannot initialize, Aerobix falls back to mock data.
 3. Fill:
    - `Client ID`
    - `Client Secret`
+   - Optional HR profile fields:
+     - `Age`
+     - `Max HR override`
+     - `HR Z1-Z4 max bpm` (for fully custom personal zones)
 4. Press `s` to save.
 5. Press `a` to open Strava auth page.
 6. Approve access and copy the `code` query parameter from the redirect URL.
@@ -79,6 +83,9 @@ Strava config/tokens are stored at:
   `TSS = ((sec * NP * IF) / (FTP * 3600)) * 100`  
   Rule of thumb: ~100 TSS is close to 1 hour at FTP.
 - **EF (Efficiency Factor)**: aerobic efficiency proxy, usually `NP / Avg HR`.
+- **Heart Rate Zones**:
+  - If custom HR zone bounds are set in Settings, Aerobix uses those.
+  - Otherwise, it estimates zones from `220-age` (or Max HR override) with 60/70/80/90% splits.
 - **Decoupling**:
   - Detects a steady-state segment first
   - Compares `(avg power / avg HR)` first half vs second half  

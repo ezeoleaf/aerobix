@@ -188,6 +188,56 @@ func TimeInHeartRateZonesMinutes(hr []float64, timeSec []int) ([5]float64, error
 	return z, nil
 }
 
+// TimeInHeartRateZonesMinutesWithBounds uses explicit upper bpm bounds for Z1-Z4.
+// Z5 is anything above z4Max.
+func TimeInHeartRateZonesMinutesWithBounds(hr []float64, timeSec []int, bounds [4]float64) ([5]float64, error) {
+	var z [5]float64
+	if len(hr) == 0 || len(hr) != len(timeSec) {
+		return z, ErrInvalidInput
+	}
+	if bounds[0] <= 0 || bounds[1] <= bounds[0] || bounds[2] <= bounds[1] || bounds[3] <= bounds[2] {
+		return z, ErrInvalidInput
+	}
+
+	for i, h := range hr {
+		dtMin := sampleDurationMinutes(timeSec, i)
+		switch {
+		case h <= bounds[0]:
+			z[0] += dtMin
+		case h <= bounds[1]:
+			z[1] += dtMin
+		case h <= bounds[2]:
+			z[2] += dtMin
+		case h <= bounds[3]:
+			z[3] += dtMin
+		default:
+			z[4] += dtMin
+		}
+	}
+	return z, nil
+}
+
+func HeartRateZoneBounds(age int, maxHROverride float64, z1Max, z2Max, z3Max, z4Max float64) [4]float64 {
+	if z1Max > 0 && z2Max > z1Max && z3Max > z2Max && z4Max > z3Max {
+		return [4]float64{z1Max, z2Max, z3Max, z4Max}
+	}
+
+	maxHR := maxHROverride
+	if maxHR <= 0 {
+		if age > 0 {
+			maxHR = float64(220 - age)
+		} else {
+			maxHR = 190
+		}
+	}
+	return [4]float64{
+		maxHR * 0.60,
+		maxHR * 0.70,
+		maxHR * 0.80,
+		maxHR * 0.90,
+	}
+}
+
 func rollingMean(values []float64, window int) []float64 {
 	if len(values) < window || window <= 0 {
 		return nil

@@ -26,6 +26,12 @@ const (
 type config struct {
 	AthleteName  string  `json:"athlete_name"`
 	FTP          float64 `json:"ftp"`
+	Age          int     `json:"age"`
+	MaxHeartRate float64 `json:"max_heart_rate"`
+	HRZone1Max   float64 `json:"hr_zone_1_max"`
+	HRZone2Max   float64 `json:"hr_zone_2_max"`
+	HRZone3Max   float64 `json:"hr_zone_3_max"`
+	HRZone4Max   float64 `json:"hr_zone_4_max"`
 	ClientID     string  `json:"client_id"`
 	ClientSecret string  `json:"client_secret"`
 	AccessToken  string  `json:"access_token"`
@@ -50,6 +56,7 @@ func NewProvider() (Provider, error) {
 		cfg: config{
 			AthleteName: "Hacker Athlete",
 			FTP:         265,
+			Age:         30,
 		},
 	}
 	_ = p.load()
@@ -66,6 +73,12 @@ func (p Provider) Settings() provider.Settings {
 	return provider.Settings{
 		AthleteName:  p.cfg.AthleteName,
 		FTP:          p.cfg.FTP,
+		Age:          p.cfg.Age,
+		MaxHeartRate: p.cfg.MaxHeartRate,
+		HRZone1Max:   p.cfg.HRZone1Max,
+		HRZone2Max:   p.cfg.HRZone2Max,
+		HRZone3Max:   p.cfg.HRZone3Max,
+		HRZone4Max:   p.cfg.HRZone4Max,
 		ClientID:     p.cfg.ClientID,
 		ClientSecret: p.cfg.ClientSecret,
 		Configured:   p.cfg.ClientID != "" && p.cfg.ClientSecret != "",
@@ -76,6 +89,12 @@ func (p Provider) Settings() provider.Settings {
 func (p *Provider) UpdateSettings(s provider.Settings) error {
 	p.cfg.AthleteName = s.AthleteName
 	p.cfg.FTP = s.FTP
+	p.cfg.Age = s.Age
+	p.cfg.MaxHeartRate = s.MaxHeartRate
+	p.cfg.HRZone1Max = s.HRZone1Max
+	p.cfg.HRZone2Max = s.HRZone2Max
+	p.cfg.HRZone3Max = s.HRZone3Max
+	p.cfg.HRZone4Max = s.HRZone4Max
 	p.cfg.ClientID = strings.TrimSpace(s.ClientID)
 	p.cfg.ClientSecret = strings.TrimSpace(s.ClientSecret)
 	return p.save()

@@ -44,6 +44,7 @@ func (p Provider) Settings() provider.Settings {
 	return provider.Settings{
 		AthleteName: "Hacker Athlete",
 		FTP:         265,
+		Age:         30,
 		Configured:  true,
 		Connected:   true,
 	}

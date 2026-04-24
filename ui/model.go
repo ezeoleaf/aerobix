@@ -103,7 +103,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.activities = msg.activities
-		m.summaries = buildSummaries(msg.activities, m.profile.FTP)
+		m.summaries = buildSummaries(msg.activities, m.settings)
 		m.pmc = buildPMC(m.summaries)
 		m.activityTable = newActivityTable(m.summaries)
 		if m.activityCursor >= len(m.summaries) {
@@ -160,7 +160,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activityCursor++
 				m.activityTable.SetCursor(m.activityCursor)
 			}
-			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 4 {
+			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 10 {
 				m.settingsCursor++
 			}
 		case "e":
@@ -289,6 +289,12 @@ func (m Model) renderSettings() string {
 	fields := []string{
 		fmt.Sprintf("Athlete Name: %s", m.settings.AthleteName),
 		fmt.Sprintf("FTP: %.0f", m.settings.FTP),
+		fmt.Sprintf("Age: %d", m.settings.Age),
+		fmt.Sprintf("Max HR override: %.0f", m.settings.MaxHeartRate),
+		fmt.Sprintf("HR Z1 max (bpm): %.0f", m.settings.HRZone1Max),
+		fmt.Sprintf("HR Z2 max (bpm): %.0f", m.settings.HRZone2Max),
+		fmt.Sprintf("HR Z3 max (bpm): %.0f", m.settings.HRZone3Max),
+		fmt.Sprintf("HR Z4 max (bpm): %.0f", m.settings.HRZone4Max),
 		fmt.Sprintf("Client ID: %s", maskIfNeeded(m.settings.ClientID, false)),
 		fmt.Sprintf("Client Secret: %s", maskIfNeeded(m.settings.ClientSecret, true)),
 		fmt.Sprintf("Auth Code: %s", maskIfNeeded(m.currentAuthCode(), false)),
@@ -305,7 +311,7 @@ func (m Model) renderSettings() string {
 		edit = fmt.Sprintf("\n\nEditing: %s", m.inputBuffer)
 	}
 	return fmt.Sprintf(
-		"%s\n\nProvider: %s\nConnected: %t\n\n%s\n\nActions:\n- e edit selected field\n- s save settings\n- a open Strava auth page\n- x exchange auth code",
+		"%s\n\nProvider: %s\nConnected: %t\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- s save settings\n- a open Strava auth page\n- x exchange auth code",
 		titleStyle.Render("Settings"),
 		m.dataProvider.Name(),
 		m.settings.Connected,
@@ -384,8 +390,20 @@ func (m Model) currentSettingValue() string {
 	case 1:
 		return fmt.Sprintf("%.0f", m.settings.FTP)
 	case 2:
-		return m.settings.ClientID
+		return fmt.Sprintf("%d", m.settings.Age)
 	case 3:
+		return fmt.Sprintf("%.0f", m.settings.MaxHeartRate)
+	case 4:
+		return fmt.Sprintf("%.0f", m.settings.HRZone1Max)
+	case 5:
+		return fmt.Sprintf("%.0f", m.settings.HRZone2Max)
+	case 6:
+		return fmt.Sprintf("%.0f", m.settings.HRZone3Max)
+	case 7:
+		return fmt.Sprintf("%.0f", m.settings.HRZone4Max)
+	case 8:
+		return m.settings.ClientID
+	case 9:
 		return m.settings.ClientSecret
 	default:
 		return m.currentAuthCode()
@@ -401,10 +419,34 @@ func (m *Model) applyCurrentSetting(v string) {
 			m.settings.FTP = ftp
 		}
 	case 2:
-		m.settings.ClientID = strings.TrimSpace(v)
+		if age, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && age > 0 {
+			m.settings.Age = age
+		}
 	case 3:
-		m.settings.ClientSecret = strings.TrimSpace(v)
+		if maxHR, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && maxHR >= 0 {
+			m.settings.MaxHeartRate = maxHR
+		}
 	case 4:
+		if z, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && z >= 0 {
+			m.settings.HRZone1Max = z
+		}
+	case 5:
+		if z, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && z >= 0 {
+			m.settings.HRZone2Max = z
+		}
+	case 6:
+		if z, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && z >= 0 {
+			m.settings.HRZone3Max = z
+		}
+	case 7:
+		if z, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && z >= 0 {
+			m.settings.HRZone4Max = z
+		}
+	case 8:
+		m.settings.ClientID = strings.TrimSpace(v)
+	case 9:
+		m.settings.ClientSecret = strings.TrimSpace(v)
+	case 10:
 		m.status = "Auth code captured. Press x to exchange."
 		m.setAuthCode(v)
 	}
@@ -464,16 +506,24 @@ func newActivityTable(summaries []activitySummary) table.Model {
 	return t
 }
 
-func buildSummaries(activities []domain.Activity, ftp float64) []activitySummary {
+func buildSummaries(activities []domain.Activity, settings provider.Settings) []activitySummary {
 	out := make([]activitySummary, 0, len(activities))
+	hrBounds := physics.HeartRateZoneBounds(
+		settings.Age,
+		settings.MaxHeartRate,
+		settings.HRZone1Max,
+		settings.HRZone2Max,
+		settings.HRZone3Max,
+		settings.HRZone4Max,
+	)
 	for _, a := range activities {
 		np, _ := physics.NormalizedPower(a.Power)
 		avgHR, _ := physics.AvgHeartRate(a.HeartRate)
-		ifVal, _ := physics.IntensityFactor(np, ftp)
-		tss, _ := physics.TrainingStressScore(int(a.Duration.Seconds()), np, ifVal, ftp)
+		ifVal, _ := physics.IntensityFactor(np, settings.FTP)
+		tss, _ := physics.TrainingStressScore(int(a.Duration.Seconds()), np, ifVal, settings.FTP)
 		decoupling, _ := physics.AerobicDecoupling(a)
-		zones, basis := deriveZones(a, ftp)
-		hrZones, _ := physics.TimeInHeartRateZonesMinutes(a.HeartRate, a.TimeSec)
+		zones, basis := deriveZones(a, settings.FTP, hrBounds)
+		hrZones, _ := physics.TimeInHeartRateZonesMinutesWithBounds(a.HeartRate, a.TimeSec, hrBounds)
 		out = append(out, activitySummary{
 			Activity:   a,
 			NP:         np,
@@ -604,14 +654,14 @@ func max(a, b int) int {
 	return b
 }
 
-func deriveZones(a domain.Activity, ftp float64) ([5]float64, string) {
+func deriveZones(a domain.Activity, ftp float64, hrBounds [4]float64) ([5]float64, string) {
 	if hasUsablePower(a.Power) && len(a.Power) == len(a.TimeSec) {
 		if z, err := physics.TimeInPowerZonesMinutes(a.Power, a.TimeSec, ftp); err == nil {
 			return z, "Power"
 		}
 	}
 	if len(a.HeartRate) == len(a.TimeSec) {
-		if z, err := physics.TimeInHeartRateZonesMinutes(a.HeartRate, a.TimeSec); err == nil {
+		if z, err := physics.TimeInHeartRateZonesMinutesWithBounds(a.HeartRate, a.TimeSec, hrBounds); err == nil {
 			return z, "Heart Rate"
 		}
 	}
