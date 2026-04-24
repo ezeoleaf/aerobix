@@ -1,0 +1,790 @@
+package ui
+
+import (
+	"fmt"
+	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"aerobix/domain"
+	"aerobix/physics"
+	"aerobix/provider"
+
+	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/guptarohit/asciigraph"
+)
+
+type activitiesLoadedMsg struct {
+	activities []domain.Activity
+	err        error
+}
+
+type authURLMsg struct {
+	url string
+	err error
+}
+
+type exchangeMsg struct {
+	err error
+}
+
+type activitySummary struct {
+	Activity   domain.Activity
+	NP         float64
+	IF         float64
+	TSS        float64
+	Decoupling float64
+	AvgHR      float64
+	AvgPace    string
+	Duration   string
+	Zones      [5]float64
+	ZoneBasis  string
+	HRZones    [5]float64
+}
+
+var navItems = []string{"Dashboard", "Activities", "Settings"}
+
+type Model struct {
+	width          int
+	height         int
+	navCursor      int
+	activityCursor int
+	loading        bool
+	status         string
+
+	dataProvider provider.DataProvider
+	settings     provider.Settings
+	profile      domain.AthleteProfile
+
+	activities    []domain.Activity
+	summaries     []activitySummary
+	pmc           []physics.PMCPoint
+	activityTable table.Model
+
+	settingsCursor int
+	editMode       bool
+	inputBuffer    string
+	authCode       string
+}
+
+func NewModel(dataProvider provider.DataProvider) Model {
+	settings := dataProvider.Settings()
+	return Model{
+		dataProvider:   dataProvider,
+		settings:       settings,
+		profile:        dataProvider.AthleteProfile(),
+		activityTable:  newActivityTable(nil),
+		loading:        true,
+		status:         "Press r to reload activities.",
+		settingsCursor: 0,
+	}
+}
+
+func (m Model) Init() tea.Cmd {
+	return m.loadActivitiesCmd()
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.activityTable.SetWidth(max(msg.Width-30, 70))
+		m.activityTable.SetHeight(max(msg.Height-21, 6))
+		return m, nil
+	case activitiesLoadedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.status = "Load failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.activities = msg.activities
+		m.summaries = buildSummaries(msg.activities, m.profile.FTP)
+		m.pmc = buildPMC(m.summaries)
+		m.activityTable = newActivityTable(m.summaries)
+		if m.activityCursor >= len(m.summaries) {
+			m.activityCursor = max(len(m.summaries)-1, 0)
+		}
+		m.activityTable.SetCursor(m.activityCursor)
+		m.status = fmt.Sprintf("Loaded %d activities from %s.", len(m.activities), m.dataProvider.Name())
+		return m, nil
+	case authURLMsg:
+		if msg.err != nil {
+			m.status = "Auth URL error: " + msg.err.Error()
+			return m, nil
+		}
+		m.status = "Opened auth URL in browser. Copy code and paste into Auth Code."
+		return m, openBrowserCmd(msg.url)
+	case exchangeMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.status = "Code exchange failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.settings = m.dataProvider.Settings()
+		m.status = "Connected to Strava. Reloading activities..."
+		m.loading = true
+		return m, m.loadActivitiesCmd()
+	case tea.KeyMsg:
+		if m.editMode {
+			return m.handleEditKeys(msg)
+		}
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "r":
+			m.loading = true
+			return m, m.loadActivitiesCmd()
+		case "left", "h":
+			if m.navCursor > 0 {
+				m.navCursor--
+			}
+		case "right", "l":
+			if m.navCursor < len(navItems)-1 {
+				m.navCursor++
+			}
+		case "up", "k":
+			if navItems[m.navCursor] == "Activities" && m.activityCursor > 0 {
+				m.activityCursor--
+				m.activityTable.SetCursor(m.activityCursor)
+			}
+			if navItems[m.navCursor] == "Settings" && m.settingsCursor > 0 {
+				m.settingsCursor--
+			}
+		case "down", "j":
+			if navItems[m.navCursor] == "Activities" && m.activityCursor < len(m.summaries)-1 {
+				m.activityCursor++
+				m.activityTable.SetCursor(m.activityCursor)
+			}
+			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 4 {
+				m.settingsCursor++
+			}
+		case "e":
+			if navItems[m.navCursor] == "Settings" {
+				m.editMode = true
+				m.inputBuffer = m.currentSettingValue()
+				m.status = "Editing field. Enter to save, Esc to cancel."
+			}
+		case "s":
+			if navItems[m.navCursor] == "Settings" {
+				if err := m.persistSettings(); err != nil {
+					m.status = "Save failed: " + err.Error()
+				} else {
+					m.status = "Settings saved."
+				}
+			}
+		case "a":
+			if navItems[m.navCursor] == "Settings" {
+				return m, m.authURLCmd()
+			}
+		case "x":
+			if navItems[m.navCursor] == "Settings" {
+				m.loading = true
+				return m, m.exchangeCodeCmd()
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m Model) handleEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editMode = false
+		m.inputBuffer = ""
+		m.status = "Edit cancelled."
+	case "enter":
+		m.applyCurrentSetting(m.inputBuffer)
+		m.editMode = false
+		m.inputBuffer = ""
+		m.status = "Field updated. Press s to save."
+	case "backspace":
+		if len(m.inputBuffer) > 0 {
+			m.inputBuffer = m.inputBuffer[:len(m.inputBuffer)-1]
+		}
+	default:
+		// Bubble Tea emits paste as a multi-rune KeyRunes event.
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			m.inputBuffer += string(msg.Runes)
+		}
+	}
+	return m, nil
+}
+
+func (m Model) View() string {
+	sidebar := m.renderSidebar()
+	main := m.renderMain()
+	return appStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main))
+}
+
+func (m Model) renderSidebar() string {
+	var rows []string
+	for i, item := range navItems {
+		cursor := "  "
+		style := navItemStyle
+		if i == m.navCursor {
+			cursor = "->"
+			style = navItemActiveStyle
+		}
+		rows = append(rows, style.Render(fmt.Sprintf("%s %s", cursor, item)))
+	}
+	body := strings.Join(rows, "\n")
+	help := mutedStyle.Render("\nKeys: h/l nav | j/k move | r reload | q quit")
+	return sidebarStyle.Render("Aerobix\n\n" + body + help)
+}
+
+func (m Model) renderMain() string {
+	content := ""
+	switch navItems[m.navCursor] {
+	case "Dashboard":
+		content = m.renderDashboard()
+	case "Activities":
+		content = m.renderActivities()
+	default:
+		content = m.renderSettings()
+	}
+	loading := ""
+	if m.loading {
+		loading = "\n\nLoading..."
+	}
+	status := mutedStyle.Render("\n\n" + m.status)
+	return panelStyle.Width(max(m.width-28, 78)).Render(content + loading + status)
+}
+
+func (m Model) renderDashboard() string {
+	if len(m.pmc) == 0 {
+		return titleStyle.Render("Dashboard") + "\n\nNo training load data yet."
+	}
+	last := m.pmc[len(m.pmc)-1]
+	top := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		statStyle(fitnessColor).Render(fmt.Sprintf("Fitness (CTL)\n%.1f", last.CTL)),
+		statStyle(fatigueColor).Render(fmt.Sprintf("Fatigue (ATL)\n%.1f", last.ATL)),
+		statStyle(formColor).Render(fmt.Sprintf("Form (TSB)\n%.1f", last.TSB)),
+	)
+	trend := make([]float64, 0, len(m.pmc))
+	for _, p := range m.pmc {
+		trend = append(trend, p.CTL)
+	}
+	graph := asciigraph.Plot(trend, asciigraph.Height(6), asciigraph.Caption("CTL trend"))
+	readiness := subtleBoxStyle.Render(renderReadinessSummary(last))
+	weekly := subtleBoxStyle.Render(renderWeeklySummary(m.summaries))
+	explain := subtleBoxStyle.Render(renderMeaningLegend(last))
+	return titleStyle.Render("Dashboard") + "\n\n" + top + "\n\n" + readiness + "\n\n" + weekly + "\n\n" + graph + "\n\n" + explain
+}
+
+func (m Model) renderActivities() string {
+	details := mutedStyle.Render("No selected activity.")
+	if m.activityCursor >= 0 && m.activityCursor < len(m.summaries) {
+		details = m.renderDetails(m.summaries[m.activityCursor])
+	}
+	return titleStyle.Render("Activities") + "\n\n" + m.activityTable.View() + "\n\n" + details
+}
+
+func (m Model) renderSettings() string {
+	fields := []string{
+		fmt.Sprintf("Athlete Name: %s", m.settings.AthleteName),
+		fmt.Sprintf("FTP: %.0f", m.settings.FTP),
+		fmt.Sprintf("Client ID: %s", maskIfNeeded(m.settings.ClientID, false)),
+		fmt.Sprintf("Client Secret: %s", maskIfNeeded(m.settings.ClientSecret, true)),
+		fmt.Sprintf("Auth Code: %s", maskIfNeeded(m.currentAuthCode(), false)),
+	}
+	for i := range fields {
+		if i == m.settingsCursor {
+			fields[i] = navItemActiveStyle.Render("-> " + fields[i])
+		} else {
+			fields[i] = navItemStyle.Render("   " + fields[i])
+		}
+	}
+	edit := ""
+	if m.editMode {
+		edit = fmt.Sprintf("\n\nEditing: %s", m.inputBuffer)
+	}
+	return fmt.Sprintf(
+		"%s\n\nProvider: %s\nConnected: %t\n\n%s\n\nActions:\n- e edit selected field\n- s save settings\n- a open Strava auth page\n- x exchange auth code",
+		titleStyle.Render("Settings"),
+		m.dataProvider.Name(),
+		m.settings.Connected,
+		strings.Join(fields, "\n"),
+	) + edit
+}
+
+func (m Model) renderDetails(s activitySummary) string {
+	zones := renderZoneBars(s.Zones)
+	hrZones := renderZoneBars(s.HRZones)
+	verdict := sessionVerdict(s)
+	series := smoothSeries(pickSparkSeries(s.Activity), 5)
+	spark := asciigraph.Plot(downsample(series, 120), asciigraph.Height(6), asciigraph.Caption(sparkCaption(s.Activity)))
+
+	zonesCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
+		fmt.Sprintf("Time in Zones (%s)\n%s", s.ZoneBasis, zones),
+	)
+	sparkCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
+		fmt.Sprintf("Session Trace\n%s", spark),
+	)
+	detailGrid := lipgloss.JoinHorizontal(lipgloss.Top, zonesCard, sparkCard)
+	if isRunSport(s.Activity.Sport) && totalZoneMinutes(s.HRZones) > 0 {
+		hrCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
+			fmt.Sprintf("Heart Rate Zones\n%s", hrZones+"\n"+zoneLegend()),
+		)
+		detailGrid = lipgloss.JoinVertical(lipgloss.Left, detailGrid, "\n"+hrCard)
+	}
+
+	return fmt.Sprintf(
+		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\nNP %.0f | IF %.2f | TSS %.1f | Decoupling %.2f%%\nSession verdict: %s\n\n%s",
+		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, s.NP, s.IF, s.TSS, s.Decoupling, verdict, detailGrid,
+	)
+}
+
+func (m Model) loadActivitiesCmd() tea.Cmd {
+	m.loading = true
+	return func() tea.Msg {
+		activities, err := m.dataProvider.RecentActivities(20)
+		return activitiesLoadedMsg{activities: activities, err: err}
+	}
+}
+
+func (m Model) authURLCmd() tea.Cmd {
+	return func() tea.Msg {
+		u, err := m.dataProvider.AuthURL()
+		return authURLMsg{url: u, err: err}
+	}
+}
+
+func (m Model) exchangeCodeCmd() tea.Cmd {
+	code := strings.TrimSpace(m.currentAuthCode())
+	return func() tea.Msg {
+		return exchangeMsg{err: m.dataProvider.ExchangeCode(code)}
+	}
+}
+
+func openBrowserCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		_ = exec.Command("open", url).Run()
+		return nil
+	}
+}
+
+func (m *Model) persistSettings() error {
+	if err := m.dataProvider.UpdateSettings(m.settings); err != nil {
+		return err
+	}
+	m.profile = m.dataProvider.AthleteProfile()
+	return nil
+}
+
+func (m Model) currentSettingValue() string {
+	switch m.settingsCursor {
+	case 0:
+		return m.settings.AthleteName
+	case 1:
+		return fmt.Sprintf("%.0f", m.settings.FTP)
+	case 2:
+		return m.settings.ClientID
+	case 3:
+		return m.settings.ClientSecret
+	default:
+		return m.currentAuthCode()
+	}
+}
+
+func (m *Model) applyCurrentSetting(v string) {
+	switch m.settingsCursor {
+	case 0:
+		m.settings.AthleteName = strings.TrimSpace(v)
+	case 1:
+		if ftp, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && ftp > 0 {
+			m.settings.FTP = ftp
+		}
+	case 2:
+		m.settings.ClientID = strings.TrimSpace(v)
+	case 3:
+		m.settings.ClientSecret = strings.TrimSpace(v)
+	case 4:
+		m.status = "Auth code captured. Press x to exchange."
+		m.setAuthCode(v)
+	}
+}
+
+func (m *Model) setAuthCode(v string) {
+	m.authCode = strings.TrimSpace(v)
+}
+
+func (m Model) currentAuthCode() string {
+	return m.authCode
+}
+
+func maskIfNeeded(v string, secret bool) string {
+	if v == "" {
+		return "(empty)"
+	}
+	if !secret {
+		return v
+	}
+	if len(v) <= 4 {
+		return "****"
+	}
+	return strings.Repeat("*", len(v)-4) + v[len(v)-4:]
+}
+
+func newActivityTable(summaries []activitySummary) table.Model {
+	columns := []table.Column{
+		{Title: "Date", Width: 12},
+		{Title: "Title", Width: 24},
+		{Title: "Dur", Width: 7},
+		{Title: "Pace", Width: 9},
+		{Title: "AvgHR", Width: 7},
+		{Title: "TSS", Width: 8},
+		{Title: "IF", Width: 8},
+		{Title: "Decoupling", Width: 14},
+	}
+	rows := make([]table.Row, 0, len(summaries))
+	for _, s := range summaries {
+		rows = append(rows, table.Row{
+			s.Activity.StartTime.Format("2006-01-02"),
+			s.Activity.Name,
+			s.Duration,
+			s.AvgPace,
+			formatAvgHRCell(s.AvgHR),
+			fmt.Sprintf("%.1f", s.TSS),
+			fmt.Sprintf("%.2f", s.IF),
+			colorDecoupling(s.Decoupling),
+		})
+	}
+
+	t := table.New(table.WithColumns(columns), table.WithRows(rows), table.WithFocused(true), table.WithHeight(8))
+	st := table.DefaultStyles()
+	st.Header = st.Header.BorderStyle(lipgloss.NormalBorder()).BorderBottom(true).Bold(true)
+	st.Selected = st.Selected.Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Bold(true)
+	t.SetStyles(st)
+	return t
+}
+
+func buildSummaries(activities []domain.Activity, ftp float64) []activitySummary {
+	out := make([]activitySummary, 0, len(activities))
+	for _, a := range activities {
+		np, _ := physics.NormalizedPower(a.Power)
+		avgHR, _ := physics.AvgHeartRate(a.HeartRate)
+		ifVal, _ := physics.IntensityFactor(np, ftp)
+		tss, _ := physics.TrainingStressScore(int(a.Duration.Seconds()), np, ifVal, ftp)
+		decoupling, _ := physics.AerobicDecoupling(a)
+		zones, basis := deriveZones(a, ftp)
+		hrZones, _ := physics.TimeInHeartRateZonesMinutes(a.HeartRate, a.TimeSec)
+		out = append(out, activitySummary{
+			Activity:   a,
+			NP:         np,
+			IF:         ifVal,
+			TSS:        tss,
+			Decoupling: decoupling,
+			AvgHR:      avgHR,
+			AvgPace:    formatPace(a.Sport, a.DistanceKM, a.Duration),
+			Duration:   formatDurationCompact(a.Duration),
+			Zones:      zones,
+			ZoneBasis:  basis,
+			HRZones:    hrZones,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Activity.StartTime.After(out[j].Activity.StartTime) })
+	return out
+}
+
+func buildPMC(summaries []activitySummary) []physics.PMCPoint {
+	daily := map[string]float64{}
+	dateMap := map[string]time.Time{}
+	for _, s := range summaries {
+		d := time.Date(s.Activity.StartTime.Year(), s.Activity.StartTime.Month(), s.Activity.StartTime.Day(), 0, 0, 0, 0, s.Activity.StartTime.Location())
+		k := d.Format("2006-01-02")
+		daily[k] += s.TSS
+		dateMap[k] = d
+	}
+	keys := make([]string, 0, len(daily))
+	for k := range daily {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	loads := make([]physics.DailyLoad, 0, len(keys))
+	for _, k := range keys {
+		loads = append(loads, physics.DailyLoad{Date: dateMap[k], TSS: daily[k]})
+	}
+	return physics.PerformanceManagement(loads)
+}
+
+func renderZoneBars(z [5]float64) string {
+	total := 0.0
+	for _, v := range z {
+		total += v
+	}
+	if total <= 0 {
+		return "No zone data available."
+	}
+	const maxWidth = 28
+	var lines []string
+	for i, v := range z {
+		pct := (v / total) * 100
+		width := int((pct / 100) * maxWidth)
+		if width == 0 && v > 0 {
+			width = 1
+		}
+		line := fmt.Sprintf("Z%d | %-28s %5.1f min (%4.1f%%)", i+1, strings.Repeat("#", width), v, pct)
+		lines = append(lines, zoneStyle(i).Render(line))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func sampleEveryN(v []float64, n int) []float64 {
+	if n <= 1 {
+		return v
+	}
+	out := make([]float64, 0, (len(v)/n)+1)
+	for i := 0; i < len(v); i += n {
+		out = append(out, v[i])
+	}
+	return out
+}
+
+func downsample(v []float64, maxPoints int) []float64 {
+	if len(v) <= maxPoints || maxPoints <= 1 {
+		return v
+	}
+	step := len(v) / maxPoints
+	if step < 1 {
+		step = 1
+	}
+	out := make([]float64, 0, maxPoints+1)
+	for i := 0; i < len(v); i += step {
+		out = append(out, v[i])
+	}
+	return out
+}
+
+func smoothSeries(v []float64, window int) []float64 {
+	if len(v) == 0 || window <= 1 {
+		return v
+	}
+	out := make([]float64, len(v))
+	half := window / 2
+	for i := range v {
+		start := i - half
+		if start < 0 {
+			start = 0
+		}
+		end := i + half + 1
+		if end > len(v) {
+			end = len(v)
+		}
+		sum := 0.0
+		for j := start; j < end; j++ {
+			sum += v[j]
+		}
+		out[i] = sum / float64(end-start)
+	}
+	return out
+}
+
+func colorDecoupling(v float64) string {
+	txt := fmt.Sprintf("%.2f%%", v)
+	switch {
+	case v < 5:
+		return goodStyle.Render(txt)
+	case v <= 10:
+		return warnStyle.Render(txt)
+	default:
+		return badStyle.Render(txt)
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func deriveZones(a domain.Activity, ftp float64) ([5]float64, string) {
+	if hasUsablePower(a.Power) && len(a.Power) == len(a.TimeSec) {
+		if z, err := physics.TimeInPowerZonesMinutes(a.Power, a.TimeSec, ftp); err == nil {
+			return z, "Power"
+		}
+	}
+	if len(a.HeartRate) == len(a.TimeSec) {
+		if z, err := physics.TimeInHeartRateZonesMinutes(a.HeartRate, a.TimeSec); err == nil {
+			return z, "Heart Rate"
+		}
+	}
+	return [5]float64{}, "Unavailable"
+}
+
+func hasUsablePower(power []float64) bool {
+	if len(power) == 0 {
+		return false
+	}
+	nonZero := 0
+	for _, p := range power {
+		if p > 0 {
+			nonZero++
+		}
+	}
+	return float64(nonZero)/float64(len(power)) > 0.7
+}
+
+func formatPace(sport string, distanceKM float64, duration time.Duration) string {
+	if distanceKM <= 0 || duration <= 0 {
+		return "-"
+	}
+	s := strings.ToLower(sport)
+	if strings.Contains(s, "run") || strings.Contains(s, "walk") {
+		secPerKM := duration.Seconds() / distanceKM
+		minPart := int(secPerKM) / 60
+		secPart := int(secPerKM) % 60
+		return fmt.Sprintf("%d:%02d/km", minPart, secPart)
+	}
+	speed := distanceKM / duration.Hours()
+	return fmt.Sprintf("%.1f km/h", speed)
+}
+
+func formatDurationCompact(d time.Duration) string {
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	return fmt.Sprintf("%02d:%02d", h, m)
+}
+
+func formatAvgHRCell(v float64) string {
+	if v <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f", v)
+}
+
+func pickSparkSeries(a domain.Activity) []float64 {
+	if hasUsablePower(a.Power) {
+		return a.Power
+	}
+	if len(a.HeartRate) > 0 {
+		return a.HeartRate
+	}
+	return []float64{0}
+}
+
+func sparkCaption(a domain.Activity) string {
+	if hasUsablePower(a.Power) {
+		return "Power sparkline"
+	}
+	return "Heart rate sparkline"
+}
+
+func sessionVerdict(s activitySummary) string {
+	total := 0.0
+	for _, v := range s.Zones {
+		total += v
+	}
+	if total <= 0 {
+		return "Insufficient zone data"
+	}
+	z1z2 := (s.Zones[0] + s.Zones[1]) / total * 100
+	z4z5 := (s.Zones[3] + s.Zones[4]) / total * 100
+	z3 := s.Zones[2] / total * 100
+
+	switch {
+	case z4z5 >= 30:
+		return "High intensity day; prioritize recovery in the next 24-48h"
+	case z1z2 >= 70:
+		return "Aerobic endurance focused; great for base development"
+	case z3 >= 35:
+		return "Steady tempo/threshold-oriented session"
+	default:
+		return "Mixed load session; balanced training stimulus"
+	}
+}
+
+func zoneStyle(idx int) lipgloss.Style {
+	switch idx {
+	case 0:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
+	case 1:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
+	case 2:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("150"))
+	case 3:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("221"))
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	}
+}
+
+func renderReadinessSummary(p physics.PMCPoint) string {
+	formState := "balanced"
+	switch {
+	case p.TSB < -15:
+		formState = "high fatigue load, prioritize recovery"
+	case p.TSB < -5:
+		formState = "productive strain, keep quality controlled"
+	case p.TSB <= 10:
+		formState = "good readiness for normal quality work"
+	default:
+		formState = "very fresh, suitable for key sessions or testing"
+	}
+	return fmt.Sprintf("Today: CTL %.1f | ATL %.1f | TSB %.1f\nCoaching read: %s", p.CTL, p.ATL, p.TSB, formState)
+}
+
+func renderMeaningLegend(p physics.PMCPoint) string {
+	load := "moderate"
+	if p.CTL >= 70 {
+		load = "high"
+	} else if p.CTL < 35 {
+		load = "building/base"
+	}
+	return fmt.Sprintf(
+		"How to read this:\n- Fitness (CTL): your long-term training load (%s)\n- Fatigue (ATL): your short-term load (last ~7 days)\n- Form (TSB): freshness = CTL - ATL (higher = fresher)\n- IF: workout intensity vs FTP (1.00 = FTP effort)\n- TSS: training load score (100 ~= 1 hour at FTP)\n- Decoupling: aerobic durability drift; <5%% is usually strong steady-state",
+		load,
+	)
+}
+
+func renderWeeklySummary(summaries []activitySummary) string {
+	if len(summaries) == 0 {
+		return "Last 7 days: no sessions"
+	}
+	cutoff := time.Now().AddDate(0, 0, -7)
+	sessions := 0
+	totalTSS := 0.0
+	longest := 0 * time.Minute
+	longestName := "-"
+	for _, s := range summaries {
+		if s.Activity.StartTime.Before(cutoff) {
+			continue
+		}
+		sessions++
+		totalTSS += s.TSS
+		if s.Activity.Duration > longest {
+			longest = s.Activity.Duration
+			longestName = s.Activity.Name
+		}
+	}
+	if sessions == 0 {
+		return "Last 7 days: no sessions"
+	}
+	return fmt.Sprintf(
+		"Last 7 days: %d sessions | Total TSS %.1f | Avg TSS %.1f\nLongest session: %s (%s)",
+		sessions, totalTSS, totalTSS/float64(sessions), longestName, formatDurationCompact(longest),
+	)
+}
+
+func zoneLegend() string {
+	return mutedStyle.Render("Legend: Z1 easy | Z2 endurance | Z3 tempo | Z4 threshold | Z5 VO2+")
+}
+
+func isRunSport(sport string) bool {
+	s := strings.ToLower(sport)
+	return strings.Contains(s, "run") || strings.Contains(s, "walk") || strings.Contains(s, "trail")
+}
+
+func totalZoneMinutes(z [5]float64) float64 {
+	total := 0.0
+	for _, v := range z {
+		total += v
+	}
+	return total
+}

@@ -1,0 +1,14 @@
+# Binaries
+/aerobix
+*.exe
+*.out
+
+# Go tooling
+*.test
+*.prof
+coverage.out
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
