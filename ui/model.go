@@ -20,6 +20,7 @@ import (
 
 type activitiesLoadedMsg struct {
 	activities []domain.Activity
+	fetchInfo  provider.FetchInfo
 	err        error
 }
 
@@ -37,6 +38,8 @@ type activitySummary struct {
 	NP         float64
 	IF         float64
 	TSS        float64
+	TRIMP      float64
+	EFSpeed    float64
 	Decoupling float64
 	AvgHR      float64
 	AvgPace    string
@@ -57,6 +60,7 @@ type Model struct {
 	status         string
 
 	dataProvider provider.DataProvider
+	fetchInfo    provider.FetchInfo
 	settings     provider.Settings
 	profile      domain.AthleteProfile
 
@@ -85,7 +89,7 @@ func NewModel(dataProvider provider.DataProvider) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return m.loadActivitiesCmd()
+	return m.loadActivitiesCmd(false)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -93,8 +97,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.activityTable.SetWidth(max(msg.Width-30, 70))
-		m.activityTable.SetHeight(max(msg.Height-21, 6))
+		m.activityTable.SetWidth(max(msg.Width-10, 70))
+		m.activityTable.SetHeight(max(msg.Height-24, 6))
 		return m, nil
 	case activitiesLoadedMsg:
 		m.loading = false
@@ -111,6 +115,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.activityTable.SetCursor(m.activityCursor)
 		m.status = fmt.Sprintf("Loaded %d activities from %s.", len(m.activities), m.dataProvider.Name())
+		if msg.fetchInfo.Source != "" {
+			m.fetchInfo = msg.fetchInfo
+			m.status = fmt.Sprintf(
+				"Loaded %d activities (%s at %s).",
+				len(m.activities),
+				msg.fetchInfo.Source,
+				formatFetchTime(msg.fetchInfo.FetchedAt),
+			)
+		}
 		return m, nil
 	case authURLMsg:
 		if msg.err != nil {
@@ -128,7 +141,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settings = m.dataProvider.Settings()
 		m.status = "Connected to Strava. Reloading activities..."
 		m.loading = true
-		return m, m.loadActivitiesCmd()
+		return m, m.loadActivitiesCmd(true)
 	case tea.KeyMsg:
 		if m.editMode {
 			return m.handleEditKeys(msg)
@@ -138,7 +151,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			m.loading = true
-			return m, m.loadActivitiesCmd()
+			return m, m.loadActivitiesCmd(true)
 		case "left", "h":
 			if m.navCursor > 0 {
 				m.navCursor--
@@ -216,25 +229,22 @@ func (m Model) handleEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
-	sidebar := m.renderSidebar()
+	tabs := m.renderTabs()
 	main := m.renderMain()
-	return appStyle.Render(lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main))
+	return appStyle.Render(lipgloss.JoinVertical(lipgloss.Left, tabs, "", main))
 }
 
-func (m Model) renderSidebar() string {
+func (m Model) renderTabs() string {
 	var rows []string
 	for i, item := range navItems {
-		cursor := "  "
-		style := navItemStyle
+		style := tabStyle
 		if i == m.navCursor {
-			cursor = "->"
-			style = navItemActiveStyle
+			style = activeTabStyle
 		}
-		rows = append(rows, style.Render(fmt.Sprintf("%s %s", cursor, item)))
+		rows = append(rows, style.Render(item))
 	}
-	body := strings.Join(rows, "\n")
-	help := mutedStyle.Render("\nKeys: h/l nav | j/k move | r reload | q quit")
-	return sidebarStyle.Render("Aerobix\n\n" + body + help)
+	help := mutedStyle.Render("  Keys: h/l nav | j/k move | r reload | q quit")
+	return lipgloss.JoinHorizontal(lipgloss.Top, rows...) + help
 }
 
 func (m Model) renderMain() string {
@@ -252,7 +262,7 @@ func (m Model) renderMain() string {
 		loading = "\n\nLoading..."
 	}
 	status := mutedStyle.Render("\n\n" + m.status)
-	return panelStyle.Width(max(m.width-28, 78)).Render(content + loading + status)
+	return panelStyle.Width(max(m.width-6, 78)).Render(content + loading + status)
 }
 
 func (m Model) renderDashboard() string {
@@ -273,8 +283,10 @@ func (m Model) renderDashboard() string {
 	graph := asciigraph.Plot(trend, asciigraph.Height(6), asciigraph.Caption("CTL trend"))
 	readiness := subtleBoxStyle.Render(renderReadinessSummary(last))
 	weekly := subtleBoxStyle.Render(renderWeeklySummary(m.summaries))
+	runPerf := subtleBoxStyle.Render(renderRunPerformanceSummary(m.summaries))
+	trends := subtleBoxStyle.Render(renderMetricTrends(m.summaries))
 	explain := subtleBoxStyle.Render(renderMeaningLegend(last))
-	return titleStyle.Render("Dashboard") + "\n\n" + top + "\n\n" + readiness + "\n\n" + weekly + "\n\n" + graph + "\n\n" + explain
+	return titleStyle.Render("Dashboard") + "\n\n" + top + "\n\n" + readiness + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
 }
 
 func (m Model) renderActivities() string {
@@ -323,16 +335,16 @@ func (m Model) renderDetails(s activitySummary) string {
 	zones := renderZoneBars(s.Zones)
 	hrZones := renderZoneBars(s.HRZones)
 	verdict := sessionVerdict(s)
-	series := smoothSeries(pickSparkSeries(s.Activity), 5)
-	spark := asciigraph.Plot(downsample(series, 120), asciigraph.Height(6), asciigraph.Caption(sparkCaption(s.Activity)))
+	// series := smoothSeries(pickSparkSeries(s.Activity), 5)
+	// spark := asciigraph.Plot(downsample(series, 120), asciigraph.Height(6), asciigraph.Caption(sparkCaption(s.Activity)))
 
 	zonesCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
 		fmt.Sprintf("Time in Zones (%s)\n%s", s.ZoneBasis, zones),
 	)
-	sparkCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
-		fmt.Sprintf("Session Trace\n%s", spark),
-	)
-	detailGrid := lipgloss.JoinHorizontal(lipgloss.Top, zonesCard, sparkCard)
+	// sparkCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
+	// 	fmt.Sprintf("Session Trace\n%s", spark),
+	// )
+	detailGrid := lipgloss.JoinVertical(lipgloss.Top, zonesCard)
 	if isRunSport(s.Activity.Sport) && totalZoneMinutes(s.HRZones) > 0 {
 		hrCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
 			fmt.Sprintf("Heart Rate Zones\n%s", hrZones+"\n"+zoneLegend()),
@@ -341,16 +353,16 @@ func (m Model) renderDetails(s activitySummary) string {
 	}
 
 	return fmt.Sprintf(
-		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\nNP %.0f | IF %.2f | TSS %.1f | Decoupling %.2f%%\nSession verdict: %s\n\n%s",
-		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, s.NP, s.IF, s.TSS, s.Decoupling, verdict, detailGrid,
+		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\nNP %.0f | IF %.2f | TSS %.1f | TRIMP %.1f | EF(speed/HR) %.4f\nDecoupling %.2f%%\nSession verdict: %s\n\n%s",
+		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, s.NP, s.IF, s.TSS, s.TRIMP, s.EFSpeed, s.Decoupling, verdict, detailGrid,
 	)
 }
 
-func (m Model) loadActivitiesCmd() tea.Cmd {
+func (m Model) loadActivitiesCmd(forceRefresh bool) tea.Cmd {
 	m.loading = true
 	return func() tea.Msg {
-		activities, err := m.dataProvider.RecentActivities(20)
-		return activitiesLoadedMsg{activities: activities, err: err}
+		activities, err := m.dataProvider.RecentActivities(20, forceRefresh)
+		return activitiesLoadedMsg{activities: activities, fetchInfo: m.dataProvider.FetchInfo(), err: err}
 	}
 }
 
@@ -380,6 +392,12 @@ func (m *Model) persistSettings() error {
 		return err
 	}
 	m.profile = m.dataProvider.AthleteProfile()
+	if len(m.activities) > 0 {
+		m.summaries = buildSummaries(m.activities, m.settings)
+		m.pmc = buildPMC(m.summaries)
+		m.activityTable = newActivityTable(m.summaries)
+		m.activityTable.SetCursor(minInt(m.activityCursor, max(len(m.summaries)-1, 0)))
+	}
 	return nil
 }
 
@@ -524,11 +542,15 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 		decoupling, _ := physics.AerobicDecoupling(a)
 		zones, basis := deriveZones(a, settings.FTP, hrBounds)
 		hrZones, _ := physics.TimeInHeartRateZonesMinutesWithBounds(a.HeartRate, a.TimeSec, hrBounds)
+		trimp := physics.TRIMPFromZones(hrZones)
+		efSpeed, _ := physics.SpeedEfficiencyFactor(a.SpeedMS, avgHR)
 		out = append(out, activitySummary{
 			Activity:   a,
 			NP:         np,
 			IF:         ifVal,
 			TSS:        tss,
+			TRIMP:      trimp,
+			EFSpeed:    efSpeed,
 			Decoupling: decoupling,
 			AvgHR:      avgHR,
 			AvgPace:    formatPace(a.Sport, a.DistanceKM, a.Duration),
@@ -649,6 +671,13 @@ func colorDecoupling(v float64) string {
 
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
@@ -788,7 +817,7 @@ func renderMeaningLegend(p physics.PMCPoint) string {
 		load = "building/base"
 	}
 	return fmt.Sprintf(
-		"How to read this:\n- Fitness (CTL): your long-term training load (%s)\n- Fatigue (ATL): your short-term load (last ~7 days)\n- Form (TSB): freshness = CTL - ATL (higher = fresher)\n- IF: workout intensity vs FTP (1.00 = FTP effort)\n- TSS: training load score (100 ~= 1 hour at FTP)\n- Decoupling: aerobic durability drift; <5%% is usually strong steady-state",
+		"How to read this:\n- Fitness (CTL): your long-term training load (%s)\n- Fatigue (ATL): your short-term load (last ~7 days)\n- Form (TSB): freshness = CTL - ATL (higher = fresher)\n- IF: workout intensity vs FTP (1.00 = FTP effort)\n- TSS: training load score (100 ~= 1 hour at FTP)\n- TRIMP: HR-zone weighted impulse (internal load)\n- EF(speed/HR): aerobic efficiency trend; higher over time is usually better\n- Decoupling: aerobic durability drift; <5%% is usually strong steady-state",
 		load,
 	)
 }
@@ -822,6 +851,40 @@ func renderWeeklySummary(summaries []activitySummary) string {
 	)
 }
 
+func renderRunPerformanceSummary(summaries []activitySummary) string {
+	if len(summaries) == 0 {
+		return "Run metrics: no data"
+	}
+	activities := make([]domain.Activity, 0, len(summaries))
+	efSum := 0.0
+	efCount := 0
+	trimpSum := 0.0
+	for _, s := range summaries {
+		activities = append(activities, s.Activity)
+		if s.EFSpeed > 0 {
+			efSum += s.EFSpeed
+			efCount++
+		}
+		trimpSum += s.TRIMP
+	}
+	cs, err := physics.CriticalSpeed(activities)
+	csText := "n/a"
+	dPrimeText := "n/a"
+	if err == nil {
+		pace := 0.0
+		if cs.CSMS > 0 {
+			pace = 1000.0 / (cs.CSMS * 60.0)
+		}
+		csText = fmt.Sprintf("%.2f m/s (%.2f min/km)", cs.CSMS, pace)
+		dPrimeText = fmt.Sprintf("%.0f m", cs.DPrimeM)
+	}
+	efText := "n/a"
+	if efCount > 0 {
+		efText = fmt.Sprintf("%.4f", efSum/float64(efCount))
+	}
+	return fmt.Sprintf("Run performance:\n- Critical Speed: %s\n- D': %s\n- Avg EF(speed/HR): %s\n- Total TRIMP (loaded set): %.1f", csText, dPrimeText, efText, trimpSum)
+}
+
 func zoneLegend() string {
 	return mutedStyle.Render("Legend: Z1 easy | Z2 endurance | Z3 tempo | Z4 threshold | Z5 VO2+")
 }
@@ -837,4 +900,94 @@ func totalZoneMinutes(z [5]float64) float64 {
 		total += v
 	}
 	return total
+}
+
+func renderMetricTrends(summaries []activitySummary) string {
+	now := time.Now()
+	last7Start := now.AddDate(0, 0, -7)
+	prev7Start := now.AddDate(0, 0, -14)
+	last28Start := now.AddDate(0, 0, -28)
+	prev28Start := now.AddDate(0, 0, -56)
+
+	last7EF, prev7EF := avgRange(summaries, last7Start, now, "ef"), avgRange(summaries, prev7Start, last7Start, "ef")
+	last7TR, prev7TR := avgRange(summaries, last7Start, now, "trimp"), avgRange(summaries, prev7Start, last7Start, "trimp")
+	last7Dec, prev7Dec := avgRange(summaries, last7Start, now, "dec"), avgRange(summaries, prev7Start, last7Start, "dec")
+
+	last28EF, prev28EF := avgRange(summaries, last28Start, now, "ef"), avgRange(summaries, prev28Start, last28Start, "ef")
+	last28TR, prev28TR := avgRange(summaries, last28Start, now, "trimp"), avgRange(summaries, prev28Start, last28Start, "trimp")
+	last28Dec, prev28Dec := avgRange(summaries, last28Start, now, "dec"), avgRange(summaries, prev28Start, last28Start, "dec")
+
+	return fmt.Sprintf(
+		"Trends (7d vs previous 7d / 28d vs previous 28d)\n- EF(speed/HR): %s / %s\n- TRIMP avg: %s / %s\n- Decoupling avg: %s / %s",
+		trendText(last7EF, prev7EF, false),
+		trendText(last28EF, prev28EF, false),
+		trendText(last7TR, prev7TR, false),
+		trendText(last28TR, prev28TR, false),
+		trendText(last7Dec, prev7Dec, true),
+		trendText(last28Dec, prev28Dec, true),
+	)
+}
+
+func avgRange(summaries []activitySummary, start, end time.Time, metric string) float64 {
+	sum := 0.0
+	count := 0
+	for _, s := range summaries {
+		t := s.Activity.StartTime
+		if t.Before(start) || !t.Before(end) {
+			continue
+		}
+		v := 0.0
+		switch metric {
+		case "ef":
+			v = s.EFSpeed
+		case "trimp":
+			v = s.TRIMP
+		case "dec":
+			v = s.Decoupling
+		}
+		if v > 0 {
+			sum += v
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	return sum / float64(count)
+}
+
+func trendText(current, previous float64, lowerIsBetter bool) string {
+	if current <= 0 || previous <= 0 {
+		return "n/a"
+	}
+	delta := ((current - previous) / previous) * 100
+	icon := "->"
+	better := delta > 0
+	if lowerIsBetter {
+		better = delta < 0
+	}
+	switch {
+	case delta > 1:
+		icon = "↑"
+	case delta < -1:
+		icon = "↓"
+	}
+	quality := "neutral"
+	if better {
+		quality = "better"
+	} else if delta != 0 {
+		quality = "worse"
+	}
+	return fmt.Sprintf("%.3f (%s %.1f%%, %s)", current, icon, delta, quality)
+}
+
+func formatFetchTime(ts string) string {
+	if ts == "" {
+		return "unknown"
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	return t.Format("2006-01-02 15:04")
 }

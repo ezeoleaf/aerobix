@@ -14,6 +14,7 @@ type Activity struct {
 	Power     []float64
 	HeartRate []float64
 	TimeSec   []int
+	SpeedMS   []float64
 }
 
 type AthleteProfile struct {

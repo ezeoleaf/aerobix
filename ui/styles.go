@@ -10,12 +10,6 @@ var (
 	appStyle = lipgloss.NewStyle().
 			Padding(1, 2)
 
-	sidebarStyle = lipgloss.NewStyle().
-			Width(22).
-			Padding(1, 1).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("63"))
-
 	panelStyle = lipgloss.NewStyle().
 			Padding(1, 2).
 			Border(lipgloss.RoundedBorder()).
@@ -46,6 +40,16 @@ var (
 			Padding(0, 1).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240"))
+
+	tabStyle = lipgloss.NewStyle().
+			Padding(0, 2).
+			Foreground(lipgloss.Color("249"))
+
+	activeTabStyle = lipgloss.NewStyle().
+			Padding(0, 2).
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("62"))
 
 	goodStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))

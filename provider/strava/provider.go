@@ -40,9 +40,11 @@ type config struct {
 }
 
 type Provider struct {
-	cfgPath string
-	http    *http.Client
-	cfg     config
+	cfgPath   string
+	cachePath string
+	http      *http.Client
+	cfg       config
+	fetchInfo provider.FetchInfo
 }
 
 func NewProvider() (Provider, error) {
@@ -51,8 +53,9 @@ func NewProvider() (Provider, error) {
 		return Provider{}, err
 	}
 	p := Provider{
-		cfgPath: cfgPath,
-		http:    &http.Client{Timeout: 20 * time.Second},
+		cfgPath:   cfgPath,
+		cachePath: filepath.Join(filepath.Dir(cfgPath), "activities_cache.json"),
+		http:      &http.Client{Timeout: 20 * time.Second},
 		cfg: config{
 			AthleteName: "Hacker Athlete",
 			FTP:         265,
@@ -84,6 +87,10 @@ func (p Provider) Settings() provider.Settings {
 		Configured:   p.cfg.ClientID != "" && p.cfg.ClientSecret != "",
 		Connected:    p.cfg.AccessToken != "",
 	}
+}
+
+func (p Provider) FetchInfo() provider.FetchInfo {
+	return p.fetchInfo
 }
 
 func (p *Provider) UpdateSettings(s provider.Settings) error {
@@ -153,7 +160,16 @@ func (p *Provider) ExchangeCode(code string) error {
 	return p.save()
 }
 
-func (p *Provider) RecentActivities(limit int) ([]domain.Activity, error) {
+func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Activity, error) {
+	if !forceRefresh {
+		if cached, fetchedAt, err := p.loadCachedActivities(limit); err == nil && len(cached) > 0 {
+			p.fetchInfo = provider.FetchInfo{
+				Source:    "cache",
+				FetchedAt: fetchedAt.Format(time.RFC3339),
+			}
+			return cached, nil
+		}
+	}
 	if p.cfg.AccessToken == "" {
 		return nil, errors.New("not connected: get auth code in Settings and press x")
 	}
@@ -207,7 +223,13 @@ func (p *Provider) RecentActivities(limit int) ([]domain.Activity, error) {
 			Power:      stream.Power,
 			HeartRate:  stream.HeartRate,
 			TimeSec:    stream.TimeSec,
+			SpeedMS:    stream.SpeedMS,
 		})
+	}
+	_ = p.saveCachedActivities(activities)
+	p.fetchInfo = provider.FetchInfo{
+		Source:    "strava",
+		FetchedAt: time.Now().Format(time.RFC3339),
 	}
 	return activities, nil
 }
@@ -216,11 +238,12 @@ type streamData struct {
 	Power     []float64
 	HeartRate []float64
 	TimeSec   []int
+	SpeedMS   []float64
 }
 
 func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 	var out streamData
-	u := fmt.Sprintf("%s/activities/%d/streams?keys=time,watts,heartrate&key_by_type=true", baseURL, activityID)
+	u := fmt.Sprintf("%s/activities/%d/streams?keys=time,watts,heartrate,velocity_smooth&key_by_type=true", baseURL, activityID)
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
 	req.Header.Set("Authorization", "Bearer "+p.cfg.AccessToken)
 	resp, err := p.http.Do(req)
@@ -241,6 +264,7 @@ func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 	timeF := raw["time"].Data
 	watts := raw["watts"].Data
 	hr := raw["heartrate"].Data
+	speed := raw["velocity_smooth"].Data
 
 	n := len(timeF)
 	if n == 0 {
@@ -249,6 +273,7 @@ func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 	out.Power = make([]float64, n)
 	out.HeartRate = make([]float64, n)
 	out.TimeSec = make([]int, n)
+	out.SpeedMS = make([]float64, n)
 	for i := 0; i < n; i++ {
 		out.TimeSec[i] = int(timeF[i])
 		if i < len(watts) {
@@ -256,6 +281,9 @@ func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 		}
 		if i < len(hr) {
 			out.HeartRate[i] = hr[i]
+		}
+		if i < len(speed) {
+			out.SpeedMS[i] = speed[i]
 		}
 	}
 	return out, nil
@@ -272,14 +300,17 @@ func syntheticStreams(elapsed int, avgWatts float64) streamData {
 	p := make([]float64, 0, samples)
 	hr := make([]float64, 0, samples)
 	t := make([]int, 0, samples)
+	speed := make([]float64, 0, samples)
+	baseSpeed := 7.5
 	for i := 0; i < samples; i++ {
 		pwr := avgWatts + float64((i%10)-5)
 		heart := 132.0 + float64(i%8) + float64(i)*0.02
 		p = append(p, pwr)
 		hr = append(hr, heart)
 		t = append(t, i*60)
+		speed = append(speed, baseSpeed+float64((i%5)-2)*0.1)
 	}
-	return streamData{Power: p, HeartRate: hr, TimeSec: t}
+	return streamData{Power: p, HeartRate: hr, TimeSec: t, SpeedMS: speed}
 }
 
 func (p *Provider) ensureFreshToken() error {
@@ -342,4 +373,40 @@ func configPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(base, "aerobix", "strava.json"), nil
+}
+
+type activitiesCache struct {
+	FetchedAt  time.Time         `json:"fetched_at"`
+	Activities []domain.Activity `json:"activities"`
+}
+
+func (p *Provider) loadCachedActivities(limit int) ([]domain.Activity, time.Time, error) {
+	b, err := os.ReadFile(p.cachePath)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	var c activitiesCache
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, time.Time{}, err
+	}
+	acts := c.Activities
+	if limit > 0 && len(acts) > limit {
+		acts = acts[:limit]
+	}
+	return acts, c.FetchedAt, nil
+}
+
+func (p *Provider) saveCachedActivities(activities []domain.Activity) error {
+	c := activitiesCache{
+		FetchedAt:  time.Now(),
+		Activities: activities,
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p.cachePath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p.cachePath, b, 0o600)
 }

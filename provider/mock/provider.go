@@ -26,7 +26,7 @@ func (p Provider) AthleteProfile() domain.AthleteProfile {
 	}
 }
 
-func (p Provider) RecentActivities(limit int) ([]domain.Activity, error) {
+func (p Provider) RecentActivities(limit int, _ bool) ([]domain.Activity, error) {
 	now := time.Now()
 	activities := []domain.Activity{
 		newRide("strava-001", "Endurance Ride", "Strava", now.Add(-24*time.Hour), 95*time.Minute, 52.4),
@@ -47,6 +47,13 @@ func (p Provider) Settings() provider.Settings {
 		Age:         30,
 		Configured:  true,
 		Connected:   true,
+	}
+}
+
+func (p Provider) FetchInfo() provider.FetchInfo {
+	return provider.FetchInfo{
+		Source:    "mock",
+		FetchedAt: time.Now().Format(time.RFC3339),
 	}
 }
 
@@ -91,7 +98,20 @@ func newRide(id, name, source string, start time.Time, duration time.Duration, d
 		Power:      power,
 		HeartRate:  hr,
 		TimeSec:    timeSec,
+		SpeedMS:    syntheticSpeedSeries(distanceKM, duration, samples),
 	}
+}
+
+func syntheticSpeedSeries(distanceKM float64, duration time.Duration, samples int) []float64 {
+	if samples <= 0 || duration <= 0 {
+		return nil
+	}
+	base := (distanceKM * 1000.0) / duration.Seconds()
+	out := make([]float64, 0, samples)
+	for i := 0; i < samples; i++ {
+		out = append(out, base+float64((i%6)-3)*0.05)
+	}
+	return out
 }
 
 func FormatDuration(d time.Duration) string {

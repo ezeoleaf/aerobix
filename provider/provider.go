@@ -17,11 +17,17 @@ type Settings struct {
 	Connected    bool
 }
 
+type FetchInfo struct {
+	Source    string
+	FetchedAt string
+}
+
 type DataProvider interface {
 	Name() string
 	AthleteProfile() domain.AthleteProfile
-	RecentActivities(limit int) ([]domain.Activity, error)
+	RecentActivities(limit int, forceRefresh bool) ([]domain.Activity, error)
 	Settings() Settings
+	FetchInfo() FetchInfo
 	UpdateSettings(Settings) error
 	AuthURL() (string, error)
 	ExchangeCode(code string) error

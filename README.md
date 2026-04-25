@@ -8,12 +8,15 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
 
 - TUI with sidebar navigation (`Dashboard`, `Activities`, `Settings`)
 - Strava OAuth integration with local token persistence
+- Local activity caching (instant startup if cache exists)
 - Mock provider fallback for offline/dev usage
 - Core performance metrics:
   - Normalized Power (NP)
-  - Efficiency Factor (EF)
+  - Efficiency Factor (EF speed/HR)
   - Intensity Factor (IF)
   - Training Stress Score (TSS)
+  - TRIMP (HR-zone weighted training impulse)
+  - Critical Speed (CS) + D' for running
   - Aerobic Decoupling (Pw:HR)
   - CTL / ATL / TSB (Performance Management Chart model)
 - Activity details:
@@ -25,7 +28,7 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.26+
 - Strava API app credentials (Client ID + Client Secret) if using live data
 
 ### Run
@@ -36,6 +39,15 @@ go run .
 ```
 
 If Strava provider cannot initialize, Aerobix falls back to mock data.
+
+## Activity Caching
+
+- On startup, Aerobix uses cached activities when available.
+- Fresh Strava fetch happens when:
+  - cache is missing, or
+  - you press `r` to reload.
+- Cache file:
+  - macOS/Linux: `~/.config/aerobix/activities_cache.json`
 
 ## Strava Setup
 
@@ -83,6 +95,8 @@ Strava config/tokens are stored at:
   `TSS = ((sec * NP * IF) / (FTP * 3600)) * 100`  
   Rule of thumb: ~100 TSS is close to 1 hour at FTP.
 - **EF (Efficiency Factor)**: aerobic efficiency proxy, usually `NP / Avg HR`.
+- **EF (speed/HR)**: average speed divided by average HR.  
+  Track trend over time: rising EF at similar conditions often means improved aerobic efficiency.
 - **Heart Rate Zones**:
   - If custom HR zone bounds are set in Settings, Aerobix uses those.
   - Otherwise, it estimates zones from `220-age` (or Max HR override) with 60/70/80/90% splits.
@@ -93,6 +107,12 @@ Strava config/tokens are stored at:
 - **CTL/ATL/TSB**:
   - EWMA over 42d (CTL) and 7d (ATL), `TSB = CTL - ATL`
   - CTL = long-term fitness, ATL = short-term fatigue, TSB = readiness/form
+- **TRIMP**:
+  - HR-zone weighted internal load (not just distance/time).
+  - Useful when power data is absent (many run sessions).
+- **Critical Speed (CS) / D'**:
+  - Running analog to FTP derived from best sustained speeds.
+  - Aerobix estimates from best 3min and 9min efforts across your run set.
 
 ## Current Project Layout
 
