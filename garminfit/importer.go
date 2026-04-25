@@ -3,6 +3,7 @@ package garminfit
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -169,9 +170,11 @@ func parseFITFile(path string) (domain.Activity, error) {
 		if !s.StartTime.IsZero() {
 			start = s.StartTime
 		}
-		// FIT total_distance is meters with scale 100.
-		distanceKM = (float64(s.TotalDistance) / 100.0) / 1000.0
-		if s.TotalElapsedTime > 0 {
+		if s.TotalDistance != math.MaxUint32 {
+			// FIT total_distance is meters with scale 100.
+			distanceKM = (float64(s.TotalDistance) / 100.0) / 1000.0
+		}
+		if s.TotalElapsedTime > 0 && s.TotalElapsedTime != math.MaxUint32 {
 			// FIT total_elapsed_time is seconds with scale 1000.
 			seconds := float64(s.TotalElapsedTime) / 1000.0
 			duration = time.Duration(seconds * float64(time.Second))
@@ -195,11 +198,10 @@ func parseFITFile(path string) (domain.Activity, error) {
 		if delta < 0 {
 			delta = i
 		}
-		power = append(power, float64(r.Power))
-		hr = append(hr, float64(r.HeartRate))
+		power = append(power, sanitizeUint16Power(r.Power))
+		hr = append(hr, sanitizeUint8HR(r.HeartRate))
 		timeSec = append(timeSec, delta)
-		// FIT enhanced_speed is m/s with scale 1000.
-		speed = append(speed, float64(r.EnhancedSpeed)/1000.0)
+		speed = append(speed, sanitizeUint32Speed(r.EnhancedSpeed))
 	}
 
 	if duration <= 0 && len(timeSec) > 1 {
@@ -265,6 +267,28 @@ func titleWord(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+func sanitizeUint16Power(v uint16) float64 {
+	if v == math.MaxUint16 {
+		return 0
+	}
+	return float64(v)
+}
+
+func sanitizeUint8HR(v uint8) float64 {
+	if v == math.MaxUint8 || v == 0 {
+		return 0
+	}
+	return float64(v)
+}
+
+func sanitizeUint32Speed(v uint32) float64 {
+	if v == math.MaxUint32 || v == 0 {
+		return 0
+	}
+	// FIT enhanced_speed is m/s with scale 1000.
+	return float64(v) / 1000.0
 }
 
 func collectFITFiles(dir string) ([]string, error) {

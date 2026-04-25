@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -54,6 +55,7 @@ type activitySummary struct {
 	NP         float64
 	IF         float64
 	TSS        float64
+	TSSSource  string
 	TRIMP      float64
 	EFSpeed    float64
 	Decoupling float64
@@ -218,28 +220,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.navCursor++
 			}
 		case "up", "k":
-			if navItems[m.navCursor] == "Activities" && m.activityCursor > 0 {
-				m.activityCursor--
-				m.activityTable.SetCursor(m.activityCursor)
+			if navItems[m.navCursor] == "Activities" {
+				if m.activityCursor > 0 {
+					m.activityCursor--
+				}
+				m.activityTable.MoveUp(1)
+				m.activityTable.UpdateViewport()
 			}
 			if navItems[m.navCursor] == "Settings" && m.settingsCursor > 0 {
 				m.settingsCursor--
 			}
-			if navItems[m.navCursor] == "Garmin (Beta)" && m.garminCursor > 0 {
-				m.garminCursor--
-				m.garminTable.SetCursor(m.garminCursor)
+			if navItems[m.navCursor] == "Garmin (Beta)" {
+				if m.garminCursor > 0 {
+					m.garminCursor--
+				}
+				m.garminTable.MoveUp(1)
+				m.garminTable.UpdateViewport()
 			}
 		case "down", "j":
-			if navItems[m.navCursor] == "Activities" && m.activityCursor < len(m.summaries)-1 {
-				m.activityCursor++
-				m.activityTable.SetCursor(m.activityCursor)
+			if navItems[m.navCursor] == "Activities" {
+				if m.activityCursor < len(m.summaries)-1 {
+					m.activityCursor++
+				}
+				m.activityTable.MoveDown(1)
+				m.activityTable.UpdateViewport()
 			}
 			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 11 {
 				m.settingsCursor++
 			}
-			if navItems[m.navCursor] == "Garmin (Beta)" && m.garminCursor < len(m.garminSumm)-1 {
-				m.garminCursor++
-				m.garminTable.SetCursor(m.garminCursor)
+			if navItems[m.navCursor] == "Garmin (Beta)" {
+				if m.garminCursor < len(m.garminSumm)-1 {
+					m.garminCursor++
+				}
+				m.garminTable.MoveDown(1)
+				m.garminTable.UpdateViewport()
 			}
 		case "e":
 			if navItems[m.navCursor] == "Settings" {
@@ -453,8 +467,8 @@ func (m Model) renderDetails(s activitySummary) string {
 	}
 
 	return fmt.Sprintf(
-		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\nNP %.0f | IF %.2f | TSS %.1f | TRIMP %.1f | EF(speed/HR) %.4f\nDecoupling %.2f%%\nSession verdict: %s\n\n%s",
-		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, s.NP, s.IF, s.TSS, s.TRIMP, s.EFSpeed, s.Decoupling, verdict, detailGrid,
+		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\nNP %.0f | IF %.2f | TSS %.1f (%s) | TRIMP %.1f | EF(speed/HR) %.4f\nDecoupling %.2f%%\nSession verdict: %s\n\n%s",
+		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, s.NP, s.IF, s.TSS, s.TSSSource, s.TRIMP, s.EFSpeed, s.Decoupling, verdict, detailGrid,
 	)
 }
 
@@ -618,6 +632,7 @@ func newActivityTable(summaries []activitySummary) table.Model {
 		{Title: "Pace", Width: 9},
 		{Title: "AvgHR", Width: 7},
 		{Title: "TSS", Width: 8},
+		{Title: "TSSSrc", Width: 8},
 		{Title: "IF", Width: 8},
 		{Title: "Decoupling", Width: 14},
 	}
@@ -630,6 +645,7 @@ func newActivityTable(summaries []activitySummary) table.Model {
 			s.AvgPace,
 			formatAvgHRCell(s.AvgHR),
 			fmt.Sprintf("%.1f", s.TSS),
+			s.TSSSource,
 			fmt.Sprintf("%.2f", s.IF),
 			colorDecoupling(s.Decoupling),
 		})
@@ -654,20 +670,33 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 		settings.HRZone4Max,
 	)
 	for _, a := range activities {
-		np, _ := physics.NormalizedPower(a.Power)
+		np, _ := physics.NormalizedPowerFromTime(a.Power, a.TimeSec)
 		avgHR, _ := physics.AvgHeartRate(a.HeartRate)
-		ifVal, _ := physics.IntensityFactor(np, settings.FTP)
-		tss, _ := physics.TrainingStressScore(int(a.Duration.Seconds()), np, ifVal, settings.FTP)
-		decoupling, _ := physics.AerobicDecoupling(a)
 		zones, basis := deriveZones(a, settings.FTP, hrBounds)
 		hrZones, _ := physics.TimeInHeartRateZonesMinutesWithBounds(a.HeartRate, a.TimeSec, hrBounds)
 		trimp := physics.TRIMPFromZones(hrZones)
+		ifVal, _ := physics.IntensityFactor(np, settings.FTP)
+		tss, _ := physics.TrainingStressScore(int(a.Duration.Seconds()), np, ifVal, settings.FTP)
+		tssSource := "power"
+		if !hasUsablePower(a.Power) || np <= 0 || tss <= 0 {
+			tss = physics.EstimatedTSSFromHRZones(hrZones, int(a.Duration.Seconds()))
+			tssSource = "hr-est"
+			if tss > 0 {
+				// Approximate IF from TSS for display consistency when power is absent.
+				hours := a.Duration.Hours()
+				if hours > 0 {
+					ifVal = math.Sqrt((tss / 100.0) / hours)
+				}
+			}
+		}
+		decoupling, _ := physics.AerobicDecoupling(a)
 		efSpeed, _ := physics.SpeedEfficiencyFactor(a.SpeedMS, avgHR)
 		out = append(out, activitySummary{
 			Activity:   a,
 			NP:         np,
 			IF:         ifVal,
 			TSS:        tss,
+			TSSSource:  tssSource,
 			TRIMP:      trimp,
 			EFSpeed:    efSpeed,
 			Decoupling: decoupling,

@@ -31,6 +31,35 @@ func NormalizedPower(power []float64) (float64, error) {
 	return math.Pow(mean4, 0.25), nil
 }
 
+// NormalizedPowerFromTime computes NP using time-aware samples.
+// It expands each sample across elapsed seconds (using TimeSec deltas),
+// then applies standard NP on the resulting 1 Hz stream.
+func NormalizedPowerFromTime(power []float64, timeSec []int) (float64, error) {
+	if len(power) == 0 || len(power) != len(timeSec) {
+		return 0, ErrInvalidInput
+	}
+	expanded := make([]float64, 0, len(power))
+	for i := range power {
+		dt := 1
+		if i < len(timeSec)-1 {
+			if d := timeSec[i+1] - timeSec[i]; d > 0 {
+				dt = d
+			}
+		} else if i > 0 {
+			if d := timeSec[i] - timeSec[i-1]; d > 0 {
+				dt = d
+			}
+		}
+		if dt > 30 {
+			dt = 30
+		}
+		for j := 0; j < dt; j++ {
+			expanded = append(expanded, power[i])
+		}
+	}
+	return NormalizedPower(expanded)
+}
+
 func EfficiencyFactor(np, avgHeartRate float64) (float64, error) {
 	if avgHeartRate <= 0 {
 		return 0, ErrInvalidInput

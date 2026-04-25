@@ -21,6 +21,29 @@ func TRIMPFromZones(zoneMinutes [5]float64) float64 {
 	return total
 }
 
+// EstimatedTSSFromHRZones provides an HR-based TSS approximation for
+// activities with missing/unreliable power data.
+func EstimatedTSSFromHRZones(zoneMinutes [5]float64, durationSec int) float64 {
+	if durationSec <= 0 {
+		return 0
+	}
+	totalMin := 0.0
+	for _, z := range zoneMinutes {
+		totalMin += z
+	}
+	if totalMin <= 0 {
+		return 0
+	}
+
+	intensity := [5]float64{0.55, 0.68, 0.80, 0.92, 1.03}
+	ifhr := 0.0
+	for i := range zoneMinutes {
+		ifhr += (zoneMinutes[i] / totalMin) * intensity[i]
+	}
+	hours := float64(durationSec) / 3600.0
+	return hours * math.Pow(ifhr, 2) * 100.0
+}
+
 // SpeedEfficiencyFactor is speed (m/s) over avg HR.
 func SpeedEfficiencyFactor(speedMS []float64, avgHR float64) (float64, error) {
 	if len(speedMS) == 0 || avgHR <= 0 {
