@@ -144,7 +144,11 @@ func (p *Provider) ExchangeCode(code string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", err)
+		}
+	}()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("token exchange failed: %s", resp.Status)
 	}
@@ -190,7 +194,11 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", err)
+		}
+	}()
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("activities request failed: %s", resp.Status)
 	}
@@ -253,7 +261,11 @@ func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 	if err != nil {
 		return out, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", err)
+		}
+	}()
 	if resp.StatusCode >= 300 {
 		return out, fmt.Errorf("stream request failed: %s", resp.Status)
 	}
@@ -332,7 +344,11 @@ func (p *Provider) ensureFreshToken() error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", err)
+		}
+	}()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("token refresh failed: %s", resp.Status)
 	}

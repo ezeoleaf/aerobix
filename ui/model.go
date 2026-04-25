@@ -466,14 +466,6 @@ func (m Model) loadActivitiesCmd(forceRefresh bool) tea.Cmd {
 	}
 }
 
-func (m Model) loadGarminCmd() tea.Cmd {
-	dir := m.settings.GarminFITDir
-	return func() tea.Msg {
-		result, err := garminfit.LoadActivitiesFromDir(dir, nil)
-		return garminLoadedMsg{result: result, err: err}
-	}
-}
-
 func (m Model) startGarminImportCmd() tea.Cmd {
 	dir := m.settings.GarminFITDir
 	return func() tea.Msg {
@@ -734,17 +726,7 @@ func renderZoneBars(z [5]float64) string {
 	return strings.Join(lines, "\n")
 }
 
-func sampleEveryN(v []float64, n int) []float64 {
-	if n <= 1 {
-		return v
-	}
-	out := make([]float64, 0, (len(v)/n)+1)
-	for i := 0; i < len(v); i += n {
-		out = append(out, v[i])
-	}
-	return out
-}
-
+//nolint:unused
 func downsample(v []float64, maxPoints int) []float64 {
 	if len(v) <= maxPoints || maxPoints <= 1 {
 		return v
@@ -760,6 +742,7 @@ func downsample(v []float64, maxPoints int) []float64 {
 	return out
 }
 
+//nolint:unused
 func smoothSeries(v []float64, window int) []float64 {
 	if len(v) == 0 || window <= 1 {
 		return v
@@ -865,6 +848,7 @@ func formatAvgHRCell(v float64) string {
 	return fmt.Sprintf("%.0f", v)
 }
 
+//nolint:unused
 func pickSparkSeries(a domain.Activity) []float64 {
 	if hasUsablePower(a.Power) {
 		return a.Power
@@ -875,6 +859,7 @@ func pickSparkSeries(a domain.Activity) []float64 {
 	return []float64{0}
 }
 
+//nolint:unused
 func sparkCaption(a domain.Activity) string {
 	if hasUsablePower(a.Power) {
 		return "Power sparkline"
@@ -922,7 +907,7 @@ func zoneStyle(idx int) lipgloss.Style {
 }
 
 func renderReadinessSummary(p physics.PMCPoint) string {
-	formState := "balanced"
+	var formState string
 	switch {
 	case p.TSB < -15:
 		formState = "high fatigue load, prioritize recovery"

@@ -142,7 +142,11 @@ func parseFITFile(path string) (domain.Activity, error) {
 	if err != nil {
 		return domain.Activity{}, err
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close file %s: %v\n", path, err)
+		}
+	}()
 
 	file, err := fit.Decode(f)
 	if err != nil {
