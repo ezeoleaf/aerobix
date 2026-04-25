@@ -2,6 +2,8 @@
 
 A terminal-first training analytics app for endurance athletes.
 
+<img width="1704" height="954" alt="image" src="https://github.com/user-attachments/assets/c4840348-2e10-45f1-9ca6-1b530b3fcd62" />
+
 Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data (currently Strava), computes training metrics, and visualizes your fitness trends directly in the terminal.
 
 ## Features
@@ -23,6 +25,40 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
   - Sparkline (power or HR depending on available data)
   - Time in zones (power-based) + HR zones for runs
 - Keyboard-driven settings form (including paste support)
+
+## Metrics Notes
+
+- **NP (Normalized Power)**: captures metabolic cost better than plain average power by weighting harder efforts more heavily.  
+  Formula: 30s rolling average -> 4th power average -> 4th root.
+- **IF (Intensity Factor)**: how hard a session is relative to your FTP.  
+  `IF = NP / FTP` (example: 0.80 = moderate aerobic, 1.00 = FTP effort).
+- **TSS (Training Stress Score)**: total session load combining duration and intensity.  
+  `TSS = ((sec * NP * IF) / (FTP * 3600)) * 100`  
+  Rule of thumb: ~100 TSS is close to 1 hour at FTP.
+- **EF (Efficiency Factor)**: aerobic efficiency proxy, usually `NP / Avg HR`.
+- **EF (speed/HR)**: average speed divided by average HR.  
+  Track trend over time: rising EF at similar conditions often means improved aerobic efficiency.
+- **Heart Rate Zones**:
+  - If custom HR zone bounds are set in Settings, Aerobix uses those.
+  - Otherwise, it estimates zones from `220-age` (or Max HR override) with 60/70/80/90% splits.
+- **Decoupling**:
+  - Detects a steady-state segment first
+  - Compares `(avg power / avg HR)` first half vs second half  
+  Rule of thumb: `<5%` strong aerobic durability, `5-10%` moderate drift, `>10%` significant drift.
+- **CTL/ATL/TSB**:
+  - EWMA over 42d (CTL) and 7d (ATL), `TSB = CTL - ATL`
+  - CTL = long-term fitness, ATL = short-term fatigue, TSB = readiness/form
+- **TRIMP**:
+  - HR-zone weighted internal load (not just distance/time).
+  - Useful when power data is absent (many run sessions).
+- **Critical Speed (CS) / D'**:
+  - Running analog to FTP derived from best sustained speeds.
+  - Aerobix estimates from best 3min and 9min efforts across your run set.
+ 
+## Look
+<img width="865" height="670" alt="image" src="https://github.com/user-attachments/assets/d0157b24-a915-4166-841c-048467260e7a" />  \
+<img width="841" height="695" alt="image" src="https://github.com/user-attachments/assets/58c306b8-98f2-42a3-a007-2ef4871e15ca" />
+
 
 ## Quick Start
 
@@ -84,35 +120,6 @@ Strava config/tokens are stored at:
   - `a` open auth URL
   - `x` exchange auth code
   - in edit mode: `Enter` save field, `Esc` cancel
-
-## Metrics Notes
-
-- **NP (Normalized Power)**: captures metabolic cost better than plain average power by weighting harder efforts more heavily.  
-  Formula: 30s rolling average -> 4th power average -> 4th root.
-- **IF (Intensity Factor)**: how hard a session is relative to your FTP.  
-  `IF = NP / FTP` (example: 0.80 = moderate aerobic, 1.00 = FTP effort).
-- **TSS (Training Stress Score)**: total session load combining duration and intensity.  
-  `TSS = ((sec * NP * IF) / (FTP * 3600)) * 100`  
-  Rule of thumb: ~100 TSS is close to 1 hour at FTP.
-- **EF (Efficiency Factor)**: aerobic efficiency proxy, usually `NP / Avg HR`.
-- **EF (speed/HR)**: average speed divided by average HR.  
-  Track trend over time: rising EF at similar conditions often means improved aerobic efficiency.
-- **Heart Rate Zones**:
-  - If custom HR zone bounds are set in Settings, Aerobix uses those.
-  - Otherwise, it estimates zones from `220-age` (or Max HR override) with 60/70/80/90% splits.
-- **Decoupling**:
-  - Detects a steady-state segment first
-  - Compares `(avg power / avg HR)` first half vs second half  
-  Rule of thumb: `<5%` strong aerobic durability, `5-10%` moderate drift, `>10%` significant drift.
-- **CTL/ATL/TSB**:
-  - EWMA over 42d (CTL) and 7d (ATL), `TSB = CTL - ATL`
-  - CTL = long-term fitness, ATL = short-term fatigue, TSB = readiness/form
-- **TRIMP**:
-  - HR-zone weighted internal load (not just distance/time).
-  - Useful when power data is absent (many run sessions).
-- **Critical Speed (CS) / D'**:
-  - Running analog to FTP derived from best sustained speeds.
-  - Aerobix estimates from best 3min and 9min efforts across your run set.
 
 ## Current Project Layout
 
