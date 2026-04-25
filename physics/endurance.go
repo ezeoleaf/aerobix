@@ -41,7 +41,7 @@ func EstimatedTSSFromHRZones(zoneMinutes [5]float64, durationSec int) float64 {
 		ifhr += (zoneMinutes[i] / totalMin) * intensity[i]
 	}
 	hours := float64(durationSec) / 3600.0
-	return hours * math.Pow(ifhr, 2) * 100.0
+	return hours * ifhr * ifhr * 100.0
 }
 
 // SpeedEfficiencyFactor is speed (m/s) over avg HR.
