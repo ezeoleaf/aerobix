@@ -60,7 +60,8 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
  
 ## Look
 <img width="865" height="670" alt="image" src="https://github.com/user-attachments/assets/d0157b24-a915-4166-841c-048467260e7a" />  \
-<img width="841" height="695" alt="image" src="https://github.com/user-attachments/assets/58c306b8-98f2-42a3-a007-2ef4871e15ca" />
+<img width="841" height="695" alt="image" src="https://github.com/user-attachments/assets/58c306b8-98f2-42a3-a007-2ef4871e15ca" />  \
+<img width="1060" height="679" alt="image" src="https://github.com/user-attachments/assets/4b042b8d-b0c6-4632-8b01-2e7d556c7790" />
 
 
 ## Quick Start
