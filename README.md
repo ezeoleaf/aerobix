@@ -8,7 +8,7 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
 
 ## Features
 
-- TUI with sidebar navigation (`Dashboard`, `Activities`, `Settings`)
+- Top-tab navigation (`Dashboard`, `Activities`, `Garmin (Beta)`, `Settings`)
 - Strava OAuth integration with local token persistence
 - Local activity caching (instant startup if cache exists)
 - Mock provider fallback for offline/dev usage
@@ -24,6 +24,9 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
 - Activity details:
   - Sparkline (power or HR depending on available data)
   - Time in zones (power-based) + HR zones for runs
+- Garmin (Beta):
+  - Import local `.fit` files from a folder
+  - Parse activities concurrently and display in dedicated tab
 - Keyboard-driven settings form (including paste support)
 
 ## Metrics Notes
@@ -120,6 +123,8 @@ Strava config/tokens are stored at:
   - `a` open auth URL
   - `x` exchange auth code
   - in edit mode: `Enter` save field, `Esc` cancel
+- Garmin (Beta):
+  - `g` import `.fit` files from `Garmin FIT dir`
 
 ## Current Project Layout
 
