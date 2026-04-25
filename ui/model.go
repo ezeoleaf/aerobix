@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"aerobix/domain"
+	"aerobix/garminfit"
 	"aerobix/physics"
 	"aerobix/provider"
 
@@ -23,6 +24,21 @@ type activitiesLoadedMsg struct {
 	fetchInfo  provider.FetchInfo
 	err        error
 }
+
+type garminLoadedMsg struct {
+	result garminfit.LoadResult
+	err    error
+}
+
+type garminProgressMsg struct {
+	progress garminfit.Progress
+}
+
+type asyncChannelReadyMsg struct {
+	ch <-chan tea.Msg
+}
+
+type spinnerTickMsg struct{}
 
 type authURLMsg struct {
 	url string
@@ -49,7 +65,7 @@ type activitySummary struct {
 	HRZones    [5]float64
 }
 
-var navItems = []string{"Dashboard", "Activities", "Settings"}
+var navItems = []string{"Dashboard", "Activities", "Garmin (Beta)", "Settings"}
 
 type Model struct {
 	width          int
@@ -68,11 +84,17 @@ type Model struct {
 	summaries     []activitySummary
 	pmc           []physics.PMCPoint
 	activityTable table.Model
+	garminActs    []domain.Activity
+	garminSumm    []activitySummary
+	garminTable   table.Model
+	garminCursor  int
 
 	settingsCursor int
 	editMode       bool
 	inputBuffer    string
 	authCode       string
+	asyncCh        <-chan tea.Msg
+	spinnerFrame   int
 }
 
 func NewModel(dataProvider provider.DataProvider) Model {
@@ -82,6 +104,7 @@ func NewModel(dataProvider provider.DataProvider) Model {
 		settings:       settings,
 		profile:        dataProvider.AthleteProfile(),
 		activityTable:  newActivityTable(nil),
+		garminTable:    newActivityTable(nil),
 		loading:        true,
 		status:         "Press r to reload activities.",
 		settingsCursor: 0,
@@ -89,7 +112,7 @@ func NewModel(dataProvider provider.DataProvider) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return m.loadActivitiesCmd(false)
+	return tea.Batch(m.loadActivitiesCmd(false), spinnerTickCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -99,6 +122,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.activityTable.SetWidth(max(msg.Width-10, 70))
 		m.activityTable.SetHeight(max(msg.Height-24, 6))
+		m.garminTable.SetWidth(max(msg.Width-10, 70))
+		m.garminTable.SetHeight(max(msg.Height-24, 6))
 		return m, nil
 	case activitiesLoadedMsg:
 		m.loading = false
@@ -125,6 +150,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		return m, nil
+	case spinnerTickMsg:
+		if !m.loading {
+			return m, nil
+		}
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+		return m, spinnerTickCmd()
 	case authURLMsg:
 		if msg.err != nil {
 			m.status = "Auth URL error: " + msg.err.Error()
@@ -141,7 +172,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settings = m.dataProvider.Settings()
 		m.status = "Connected to Strava. Reloading activities..."
 		m.loading = true
-		return m, m.loadActivitiesCmd(true)
+		return m, tea.Batch(m.loadActivitiesCmd(true), spinnerTickCmd())
+	case garminLoadedMsg:
+		m.loading = false
+		m.asyncCh = nil
+		if msg.err != nil {
+			m.status = "Garmin load failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.garminActs = msg.result.Activities
+		m.garminSumm = buildSummaries(msg.result.Activities, m.settings)
+		m.garminTable = newActivityTable(m.garminSumm)
+		if m.garminCursor >= len(m.garminSumm) {
+			m.garminCursor = max(len(m.garminSumm)-1, 0)
+		}
+		m.garminTable.SetCursor(m.garminCursor)
+		m.status = fmt.Sprintf(
+			"Garmin import: %d files | %d parsed | %d failed | %d deduped | %d ready.",
+			msg.result.TotalFiles,
+			msg.result.Imported,
+			msg.result.Failed,
+			msg.result.Deduped,
+			len(m.garminActs),
+		)
+		return m, nil
 	case tea.KeyMsg:
 		if m.editMode {
 			return m.handleEditKeys(msg)
@@ -151,7 +205,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			m.loading = true
-			return m, m.loadActivitiesCmd(true)
+			return m, tea.Batch(m.loadActivitiesCmd(true), spinnerTickCmd())
+		case "g":
+			m.loading = true
+			return m, tea.Batch(m.startGarminImportCmd(), spinnerTickCmd())
 		case "left", "h":
 			if m.navCursor > 0 {
 				m.navCursor--
@@ -168,13 +225,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if navItems[m.navCursor] == "Settings" && m.settingsCursor > 0 {
 				m.settingsCursor--
 			}
+			if navItems[m.navCursor] == "Garmin (Beta)" && m.garminCursor > 0 {
+				m.garminCursor--
+				m.garminTable.SetCursor(m.garminCursor)
+			}
 		case "down", "j":
 			if navItems[m.navCursor] == "Activities" && m.activityCursor < len(m.summaries)-1 {
 				m.activityCursor++
 				m.activityTable.SetCursor(m.activityCursor)
 			}
-			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 10 {
+			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 11 {
 				m.settingsCursor++
+			}
+			if navItems[m.navCursor] == "Garmin (Beta)" && m.garminCursor < len(m.garminSumm)-1 {
+				m.garminCursor++
+				m.garminTable.SetCursor(m.garminCursor)
 			}
 		case "e":
 			if navItems[m.navCursor] == "Settings" {
@@ -200,6 +265,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.exchangeCodeCmd()
 			}
 		}
+	case asyncChannelReadyMsg:
+		m.asyncCh = msg.ch
+		m.status = "Garmin import started..."
+		return m, waitForAsyncMsg(m.asyncCh)
+	case garminProgressMsg:
+		p := msg.progress
+		stage := p.Stage
+		if stage == "" {
+			stage = "parsing"
+		}
+		m.status = fmt.Sprintf("Garmin import [%s]: %d/%d processed | %d parsed | %d failed", stage, p.Processed, p.Total, p.Parsed, p.Failed)
+		// Keep reading async messages until final garminLoadedMsg arrives.
+		if m.asyncCh != nil {
+			return m, waitForAsyncMsg(m.asyncCh)
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -243,7 +324,7 @@ func (m Model) renderTabs() string {
 		}
 		rows = append(rows, style.Render(item))
 	}
-	help := mutedStyle.Render("  Keys: h/l nav | j/k move | r reload | q quit")
+	help := mutedStyle.Render("  Keys: h/l nav | j/k move | r Strava reload | g Garmin reload | q quit")
 	return lipgloss.JoinHorizontal(lipgloss.Top, rows...) + help
 }
 
@@ -254,15 +335,25 @@ func (m Model) renderMain() string {
 		content = m.renderDashboard()
 	case "Activities":
 		content = m.renderActivities()
+	case "Garmin (Beta)":
+		content = m.renderGarmin()
 	default:
 		content = m.renderSettings()
 	}
 	loading := ""
 	if m.loading {
-		loading = "\n\nLoading..."
+		loading = "\n\n" + spinnerFrames[m.spinnerFrame] + " Loading..."
 	}
 	status := mutedStyle.Render("\n\n" + m.status)
 	return panelStyle.Width(max(m.width-6, 78)).Render(content + loading + status)
+}
+
+var spinnerFrames = []string{"|", "/", "-", "\\"}
+
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
 }
 
 func (m Model) renderDashboard() string {
@@ -297,6 +388,14 @@ func (m Model) renderActivities() string {
 	return titleStyle.Render("Activities") + "\n\n" + m.activityTable.View() + "\n\n" + details
 }
 
+func (m Model) renderGarmin() string {
+	details := mutedStyle.Render("No selected Garmin activity.")
+	if m.garminCursor >= 0 && m.garminCursor < len(m.garminSumm) {
+		details = m.renderDetails(m.garminSumm[m.garminCursor])
+	}
+	return titleStyle.Render("Garmin (Beta)") + "\n\n" + m.garminTable.View() + "\n\n" + details
+}
+
 func (m Model) renderSettings() string {
 	fields := []string{
 		fmt.Sprintf("Athlete Name: %s", m.settings.AthleteName),
@@ -307,6 +406,7 @@ func (m Model) renderSettings() string {
 		fmt.Sprintf("HR Z2 max (bpm): %.0f", m.settings.HRZone2Max),
 		fmt.Sprintf("HR Z3 max (bpm): %.0f", m.settings.HRZone3Max),
 		fmt.Sprintf("HR Z4 max (bpm): %.0f", m.settings.HRZone4Max),
+		fmt.Sprintf("Garmin FIT dir: %s", maskIfNeeded(m.settings.GarminFITDir, false)),
 		fmt.Sprintf("Client ID: %s", maskIfNeeded(m.settings.ClientID, false)),
 		fmt.Sprintf("Client Secret: %s", maskIfNeeded(m.settings.ClientSecret, true)),
 		fmt.Sprintf("Auth Code: %s", maskIfNeeded(m.currentAuthCode(), false)),
@@ -323,7 +423,7 @@ func (m Model) renderSettings() string {
 		edit = fmt.Sprintf("\n\nEditing: %s", m.inputBuffer)
 	}
 	return fmt.Sprintf(
-		"%s\n\nProvider: %s\nConnected: %t\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- s save settings\n- a open Strava auth page\n- x exchange auth code",
+		"%s\n\nProvider: %s\nConnected: %t\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- press g anywhere to import Garmin FIT from Garmin FIT dir",
 		titleStyle.Render("Settings"),
 		m.dataProvider.Name(),
 		m.settings.Connected,
@@ -338,7 +438,7 @@ func (m Model) renderDetails(s activitySummary) string {
 	// series := smoothSeries(pickSparkSeries(s.Activity), 5)
 	// spark := asciigraph.Plot(downsample(series, 120), asciigraph.Height(6), asciigraph.Caption(sparkCaption(s.Activity)))
 
-	zonesCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
+	zonesCard := cardStyle.Width(max(44, (m.width - 38))).Render(
 		fmt.Sprintf("Time in Zones (%s)\n%s", s.ZoneBasis, zones),
 	)
 	// sparkCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
@@ -346,7 +446,7 @@ func (m Model) renderDetails(s activitySummary) string {
 	// )
 	detailGrid := lipgloss.JoinVertical(lipgloss.Top, zonesCard)
 	if isRunSport(s.Activity.Sport) && totalZoneMinutes(s.HRZones) > 0 {
-		hrCard := cardStyle.Width(max(44, (m.width-38)/2)).Render(
+		hrCard := cardStyle.Width(max(44, (m.width - 38))).Render(
 			fmt.Sprintf("Heart Rate Zones\n%s", hrZones+"\n"+zoneLegend()),
 		)
 		detailGrid = lipgloss.JoinVertical(lipgloss.Left, detailGrid, "\n"+hrCard)
@@ -363,6 +463,29 @@ func (m Model) loadActivitiesCmd(forceRefresh bool) tea.Cmd {
 	return func() tea.Msg {
 		activities, err := m.dataProvider.RecentActivities(20, forceRefresh)
 		return activitiesLoadedMsg{activities: activities, fetchInfo: m.dataProvider.FetchInfo(), err: err}
+	}
+}
+
+func (m Model) loadGarminCmd() tea.Cmd {
+	dir := m.settings.GarminFITDir
+	return func() tea.Msg {
+		result, err := garminfit.LoadActivitiesFromDir(dir, nil)
+		return garminLoadedMsg{result: result, err: err}
+	}
+}
+
+func (m Model) startGarminImportCmd() tea.Cmd {
+	dir := m.settings.GarminFITDir
+	return func() tea.Msg {
+		ch := make(chan tea.Msg, 64)
+		go func() {
+			result, err := garminfit.LoadActivitiesFromDir(dir, func(p garminfit.Progress) {
+				ch <- garminProgressMsg{progress: p}
+			})
+			ch <- garminLoadedMsg{result: result, err: err}
+			close(ch)
+		}()
+		return asyncChannelReadyMsg{ch: ch}
 	}
 }
 
@@ -420,8 +543,10 @@ func (m Model) currentSettingValue() string {
 	case 7:
 		return fmt.Sprintf("%.0f", m.settings.HRZone4Max)
 	case 8:
-		return m.settings.ClientID
+		return m.settings.GarminFITDir
 	case 9:
+		return m.settings.ClientID
+	case 10:
 		return m.settings.ClientSecret
 	default:
 		return m.currentAuthCode()
@@ -461,10 +586,12 @@ func (m *Model) applyCurrentSetting(v string) {
 			m.settings.HRZone4Max = z
 		}
 	case 8:
-		m.settings.ClientID = strings.TrimSpace(v)
+		m.settings.GarminFITDir = strings.TrimSpace(v)
 	case 9:
-		m.settings.ClientSecret = strings.TrimSpace(v)
+		m.settings.ClientID = strings.TrimSpace(v)
 	case 10:
+		m.settings.ClientSecret = strings.TrimSpace(v)
+	case 11:
 		m.status = "Auth code captured. Press x to exchange."
 		m.setAuthCode(v)
 	}
@@ -990,4 +1117,14 @@ func formatFetchTime(ts string) string {
 		return ts
 	}
 	return t.Format("2006-01-02 15:04")
+}
+
+func waitForAsyncMsg(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
 }

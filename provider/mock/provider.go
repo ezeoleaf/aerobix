@@ -45,6 +45,7 @@ func (p Provider) Settings() provider.Settings {
 		AthleteName: "Hacker Athlete",
 		FTP:         265,
 		Age:         30,
+		GarminFITDir: "",
 		Configured:  true,
 		Connected:   true,
 	}

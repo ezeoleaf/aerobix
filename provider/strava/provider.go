@@ -32,6 +32,7 @@ type config struct {
 	HRZone2Max   float64 `json:"hr_zone_2_max"`
 	HRZone3Max   float64 `json:"hr_zone_3_max"`
 	HRZone4Max   float64 `json:"hr_zone_4_max"`
+	GarminFITDir string  `json:"garmin_fit_dir"`
 	ClientID     string  `json:"client_id"`
 	ClientSecret string  `json:"client_secret"`
 	AccessToken  string  `json:"access_token"`
@@ -82,6 +83,7 @@ func (p Provider) Settings() provider.Settings {
 		HRZone2Max:   p.cfg.HRZone2Max,
 		HRZone3Max:   p.cfg.HRZone3Max,
 		HRZone4Max:   p.cfg.HRZone4Max,
+		GarminFITDir: p.cfg.GarminFITDir,
 		ClientID:     p.cfg.ClientID,
 		ClientSecret: p.cfg.ClientSecret,
 		Configured:   p.cfg.ClientID != "" && p.cfg.ClientSecret != "",
@@ -102,6 +104,7 @@ func (p *Provider) UpdateSettings(s provider.Settings) error {
 	p.cfg.HRZone2Max = s.HRZone2Max
 	p.cfg.HRZone3Max = s.HRZone3Max
 	p.cfg.HRZone4Max = s.HRZone4Max
+	p.cfg.GarminFITDir = strings.TrimSpace(s.GarminFITDir)
 	p.cfg.ClientID = strings.TrimSpace(s.ClientID)
 	p.cfg.ClientSecret = strings.TrimSpace(s.ClientSecret)
 	return p.save()
