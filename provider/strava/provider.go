@@ -185,13 +185,14 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 	}
 
 	type rawActivity struct {
-		ID           int64   `json:"id"`
-		Name         string  `json:"name"`
-		SportType    string  `json:"sport_type"`
-		StartDate    string  `json:"start_date"`
-		ElapsedTime  int     `json:"elapsed_time"`
-		Distance     float64 `json:"distance"`
-		AverageWatts float64 `json:"average_watts"`
+		ID             int64   `json:"id"`
+		Name           string  `json:"name"`
+		SportType      string  `json:"sport_type"`
+		StartDate      string  `json:"start_date"`
+		ElapsedTime    int     `json:"elapsed_time"`
+		Distance       float64 `json:"distance"`
+		AverageWatts   float64 `json:"average_watts"`
+		AverageCadence float64 `json:"average_cadence"`
 	}
 	const perPage = 100
 	cutoff := time.Now().AddDate(0, 0, -42)
@@ -255,6 +256,12 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 			HeartRate:  stream.HeartRate,
 			TimeSec:    stream.TimeSec,
 			SpeedMS:    stream.SpeedMS,
+			AvgCadence: a.AverageCadence,
+			AvgStrideLengthM: estimateStrideLengthFromSpeedCadence(
+				a.Distance,
+				a.ElapsedTime,
+				a.AverageCadence,
+			),
 		})
 	}
 	_ = p.saveCachedActivities(activities)
@@ -263,6 +270,17 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 		FetchedAt: time.Now().Format(time.RFC3339),
 	}
 	return activities, nil
+}
+
+func estimateStrideLengthFromSpeedCadence(distanceMeters float64, elapsedSec int, cadenceSPM float64) float64 {
+	if distanceMeters <= 0 || elapsedSec <= 0 || cadenceSPM <= 0 {
+		return 0
+	}
+	avgSpeedMS := distanceMeters / float64(elapsedSec)
+	if avgSpeedMS <= 0 {
+		return 0
+	}
+	return (avgSpeedMS * 60.0) / cadenceSPM
 }
 
 type streamData struct {

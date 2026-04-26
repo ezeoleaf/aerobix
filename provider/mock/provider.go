@@ -42,12 +42,12 @@ func (p Provider) RecentActivities(limit int, _ bool) ([]domain.Activity, error)
 
 func (p Provider) Settings() provider.Settings {
 	return provider.Settings{
-		AthleteName: "Hacker Athlete",
-		FTP:         265,
-		Age:         30,
+		AthleteName:  "Hacker Athlete",
+		FTP:          265,
+		Age:          30,
 		GarminFITDir: "",
-		Configured:  true,
-		Connected:   true,
+		Configured:   true,
+		Connected:    true,
 	}
 }
 
@@ -100,6 +100,7 @@ func newRide(id, name, source string, start time.Time, duration time.Duration, d
 		HeartRate:  hr,
 		TimeSec:    timeSec,
 		SpeedMS:    syntheticSpeedSeries(distanceKM, duration, samples),
+		AvgCadence: 0,
 	}
 }
 

@@ -267,6 +267,15 @@ func HeartRateZoneBounds(age int, maxHROverride float64, z1Max, z2Max, z3Max, z4
 	}
 }
 
+// VerticalRatio computes running vertical ratio (%):
+// vertical oscillation (cm) divided by stride length (m), times 100.
+func VerticalRatio(verticalOscillationCM, strideLengthM float64) (float64, error) {
+	if verticalOscillationCM <= 0 || strideLengthM <= 0 {
+		return 0, ErrInvalidInput
+	}
+	return (verticalOscillationCM / (strideLengthM * 100.0)) * 100.0, nil
+}
+
 func rollingMean(values []float64, window int) []float64 {
 	if len(values) < window || window <= 0 {
 		return nil

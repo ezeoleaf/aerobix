@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -188,6 +189,9 @@ func parseFITFile(path string) (domain.Activity, error) {
 	hr := make([]float64, 0, len(activity.Records))
 	timeSec := make([]int, 0, len(activity.Records))
 	speed := make([]float64, 0, len(activity.Records))
+	cadenceSamples := make([]float64, 0, len(activity.Records))
+	voSamplesCM := make([]float64, 0, len(activity.Records))
+	strideSamplesM := make([]float64, 0, len(activity.Records))
 
 	var firstTS time.Time
 	for i, r := range activity.Records {
@@ -202,25 +206,50 @@ func parseFITFile(path string) (domain.Activity, error) {
 		hr = append(hr, sanitizeUint8HR(r.HeartRate))
 		timeSec = append(timeSec, delta)
 		speed = append(speed, sanitizeUint32Speed(r.EnhancedSpeed))
+
+		if c, ok := lookupRecordMetric(r, []string{"Cadence", "EnhancedCadence"}); ok {
+			if c = sanitizeCadence(c); c > 0 {
+				cadenceSamples = append(cadenceSamples, c)
+			}
+		}
+		if vo, ok := lookupRecordMetric(r, []string{"VerticalOscillation", "EnhancedVerticalOscillation"}); ok {
+			if voCM := sanitizeVerticalOscillationCM(vo); voCM > 0 {
+				voSamplesCM = append(voSamplesCM, voCM)
+			}
+		}
+		if sl, ok := lookupRecordMetric(r, []string{"StepLength"}); ok {
+			if slM := sanitizeStrideLengthM(sl); slM > 0 {
+				strideSamplesM = append(strideSamplesM, slM)
+			}
+		}
 	}
 
 	if duration <= 0 && len(timeSec) > 1 {
 		duration = time.Duration(timeSec[len(timeSec)-1]) * time.Second
 	}
 	name = buildActivityName(name, sport, start, distanceKM, duration)
+	avgCadence := meanOrZero(cadenceSamples)
+	avgVerticalOscillationCM := meanOrZero(voSamplesCM)
+	avgStrideLengthM := meanOrZero(strideSamplesM)
+	if avgStrideLengthM <= 0 && avgCadence > 0 && distanceKM > 0 && duration > 0 {
+		avgStrideLengthM = (distanceKM * 1000.0 / duration.Seconds()) * 60.0 / avgCadence
+	}
 
 	return domain.Activity{
-		ID:         id,
-		Name:       name,
-		Source:     "GarminFIT",
-		Sport:      sport,
-		StartTime:  start,
-		Duration:   duration,
-		DistanceKM: distanceKM,
-		Power:      power,
-		HeartRate:  hr,
-		TimeSec:    timeSec,
-		SpeedMS:    speed,
+		ID:                       id,
+		Name:                     name,
+		Source:                   "GarminFIT",
+		Sport:                    sport,
+		StartTime:                start,
+		Duration:                 duration,
+		DistanceKM:               distanceKM,
+		Power:                    power,
+		HeartRate:                hr,
+		TimeSec:                  timeSec,
+		SpeedMS:                  speed,
+		AvgCadence:               avgCadence,
+		AvgVerticalOscillationCM: avgVerticalOscillationCM,
+		AvgStrideLengthM:         avgStrideLengthM,
 	}, nil
 }
 
@@ -234,8 +263,6 @@ func buildActivityName(fileName, sport string, start time.Time, distanceKM float
 	if baseSport == "" || strings.EqualFold(baseSport, "generic") {
 		baseSport = "Activity"
 	}
-	datePart := start.Format("2006-01-02")
-	timePart := start.Format("15:04")
 
 	distPart := ""
 	if distanceKM > 0 {
@@ -248,7 +275,7 @@ func buildActivityName(fileName, sport string, start time.Time, distanceKM float
 		durPart = " | " + strconv.Itoa(h) + ":" + fmt.Sprintf("%02d", m)
 	}
 
-	pretty := fmt.Sprintf("%s - %s %s%s%s", titleWord(strings.ToLower(baseSport)), datePart, timePart, distPart, durPart)
+	pretty := fmt.Sprintf("%s%s%s", titleWord(strings.ToLower(baseSport)), distPart, durPart)
 	if strings.TrimSpace(pretty) != "" {
 		return pretty
 	}
@@ -289,6 +316,80 @@ func sanitizeUint32Speed(v uint32) float64 {
 	}
 	// FIT enhanced_speed is m/s with scale 1000.
 	return float64(v) / 1000.0
+}
+
+func sanitizeCadence(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	if v < 40 || v > 260 {
+		return 0
+	}
+	return v
+}
+
+func sanitizeVerticalOscillationCM(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+		return 0
+	}
+	// FIT fields are often scaled by 10 (e.g. 83 => 8.3 cm).
+	if v > 25 && v <= 300 {
+		v = v / 10.0
+	}
+	if v < 3 || v > 20 {
+		return 0
+	}
+	return v
+}
+
+func sanitizeStrideLengthM(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+		return 0
+	}
+	// FIT step length is commonly centimeters with scale 100.
+	if v > 5 && v <= 400 {
+		v = v / 100.0
+	}
+	if v < 0.3 || v > 3.0 {
+		return 0
+	}
+	return v
+}
+
+func lookupRecordMetric(record any, fieldNames []string) (float64, bool) {
+	rv := reflect.ValueOf(record)
+	if rv.Kind() == reflect.Pointer {
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return 0, false
+	}
+	for _, name := range fieldNames {
+		f := rv.FieldByName(name)
+		if !f.IsValid() {
+			continue
+		}
+		switch f.Kind() {
+		case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uint:
+			return float64(f.Uint()), true
+		case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Int:
+			return float64(f.Int()), true
+		case reflect.Float32, reflect.Float64:
+			return f.Float(), true
+		}
+	}
+	return 0, false
+}
+
+func meanOrZero(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, x := range v {
+		sum += x
+	}
+	return sum / float64(len(v))
 }
 
 func collectFITFiles(dir string) ([]string, error) {

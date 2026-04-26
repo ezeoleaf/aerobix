@@ -60,6 +60,9 @@ type activitySummary struct {
 	EFSpeed    float64
 	Decoupling float64
 	AvgHR      float64
+	AvgCadence float64
+	VertOscCM  float64
+	VertRatio  float64
 	AvgPace    string
 	Duration   string
 	Zones      [5]float64
@@ -90,6 +93,7 @@ type Model struct {
 	garminSumm    []activitySummary
 	garminTable   table.Model
 	garminCursor  int
+	dashProvider  string
 
 	settingsCursor int
 	editMode       bool
@@ -110,6 +114,7 @@ func NewModel(dataProvider provider.DataProvider) Model {
 		loading:        true,
 		status:         "Press r to reload activities.",
 		settingsCursor: 0,
+		dashProvider:   "strava",
 	}
 }
 
@@ -211,6 +216,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "g":
 			m.loading = true
 			return m, tea.Batch(m.startGarminImportCmd(), spinnerTickCmd())
+		case "p":
+			if navItems[m.navCursor] == "Dashboard" {
+				m.toggleDashboardProvider()
+				return m, nil
+			}
 		case "left", "h":
 			if m.navCursor > 0 {
 				m.navCursor--
@@ -338,7 +348,7 @@ func (m Model) renderTabs() string {
 		}
 		rows = append(rows, style.Render(item))
 	}
-	help := mutedStyle.Render("  Keys: h/l nav | j/k move | r Strava reload | g Garmin reload | q quit")
+	help := mutedStyle.Render("  Keys: h/l nav | j/k move | r Strava reload | g Garmin reload | p dashboard provider | q quit")
 	return lipgloss.JoinHorizontal(lipgloss.Top, rows...) + help
 }
 
@@ -371,27 +381,30 @@ func spinnerTickCmd() tea.Cmd {
 }
 
 func (m Model) renderDashboard() string {
-	if len(m.pmc) == 0 {
+	currentSummaries := m.dashboardSummaries()
+	currentPMC := buildPMC(currentSummaries)
+	if len(currentPMC) == 0 {
 		return titleStyle.Render("Dashboard") + "\n\nNo training load data yet."
 	}
-	last := m.pmc[len(m.pmc)-1]
+	last := currentPMC[len(currentPMC)-1]
 	top := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		statStyle(fitnessColor).Render(fmt.Sprintf("Fitness (CTL)\n%.1f", last.CTL)),
 		statStyle(fatigueColor).Render(fmt.Sprintf("Fatigue (ATL)\n%.1f", last.ATL)),
 		statStyle(formColor).Render(fmt.Sprintf("Form (TSB)\n%.1f", last.TSB)),
 	)
-	trend := make([]float64, 0, len(m.pmc))
-	for _, p := range m.pmc {
+	trend := make([]float64, 0, len(currentPMC))
+	for _, p := range currentPMC {
 		trend = append(trend, p.CTL)
 	}
 	graph := asciigraph.Plot(trend, asciigraph.Height(6), asciigraph.Caption("CTL trend"))
 	readiness := subtleBoxStyle.Render(renderReadinessSummary(last))
-	weekly := subtleBoxStyle.Render(renderWeeklySummary(m.summaries))
-	runPerf := subtleBoxStyle.Render(renderRunPerformanceSummary(m.summaries))
-	trends := subtleBoxStyle.Render(renderMetricTrends(m.summaries))
+	weekly := subtleBoxStyle.Render(renderWeeklySummary(currentSummaries))
+	runPerf := subtleBoxStyle.Render(renderRunPerformanceSummary(currentSummaries))
+	trends := subtleBoxStyle.Render(renderMetricTrends(currentSummaries))
 	explain := subtleBoxStyle.Render(renderMeaningLegend(last))
-	return titleStyle.Render("Dashboard") + "\n\n" + top + "\n\n" + readiness + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
+	selector := subtleBoxStyle.Render(m.renderDashboardProviderSelector())
+	return titleStyle.Render("Dashboard") + "\n\n" + selector + "\n\n" + top + "\n\n" + readiness + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
 }
 
 func (m Model) renderActivities() string {
@@ -464,6 +477,12 @@ func (m Model) renderDetails(s activitySummary) string {
 			fmt.Sprintf("Heart Rate Zones\n%s", hrZones+"\n"+zoneLegend()),
 		)
 		detailGrid = lipgloss.JoinVertical(lipgloss.Left, detailGrid, "\n"+hrCard)
+	}
+	if isRunSport(s.Activity.Sport) {
+		economyCard := cardStyle.Width(max(44, (m.width - 38))).Render(
+			renderRunningEconomy(s),
+		)
+		detailGrid = lipgloss.JoinVertical(lipgloss.Left, detailGrid, "\n"+economyCard)
 	}
 
 	return fmt.Sprintf(
@@ -689,8 +708,10 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 				}
 			}
 		}
+		tss = sanitizeTSS(tss)
 		decoupling, _ := physics.AerobicDecoupling(a)
 		efSpeed, _ := physics.SpeedEfficiencyFactor(a.SpeedMS, avgHR)
+		vertRatio, _ := physics.VerticalRatio(a.AvgVerticalOscillationCM, a.AvgStrideLengthM)
 		out = append(out, activitySummary{
 			Activity:   a,
 			NP:         np,
@@ -701,6 +722,9 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 			EFSpeed:    efSpeed,
 			Decoupling: decoupling,
 			AvgHR:      avgHR,
+			AvgCadence: a.AvgCadence,
+			VertOscCM:  a.AvgVerticalOscillationCM,
+			VertRatio:  vertRatio,
 			AvgPace:    formatPace(a.Sport, a.DistanceKM, a.Duration),
 			Duration:   formatDurationCompact(a.Duration),
 			Zones:      zones,
@@ -710,6 +734,19 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Activity.StartTime.After(out[j].Activity.StartTime) })
 	return out
+}
+
+func sanitizeTSS(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0
+	}
+	// Guardrail against broken activity records producing unrealistic load spikes.
+	// Typical single-session TSS is well below this threshold.
+	const maxReasonableSessionTSS = 500.0
+	if v > maxReasonableSessionTSS {
+		return maxReasonableSessionTSS
+	}
+	return v
 }
 
 func buildPMC(summaries []activitySummary) []physics.PMCPoint {
@@ -802,6 +839,18 @@ func colorDecoupling(v float64) string {
 	case v < 5:
 		return goodStyle.Render(txt)
 	case v <= 10:
+		return warnStyle.Render(txt)
+	default:
+		return badStyle.Render(txt)
+	}
+}
+
+func colorVerticalRatio(v float64) string {
+	txt := fmt.Sprintf("%.1f%%", v)
+	switch {
+	case v < 7:
+		return goodStyle.Render(txt)
+	case v <= 9:
 		return warnStyle.Render(txt)
 	default:
 		return badStyle.Render(txt)
@@ -918,6 +967,15 @@ func sessionVerdict(s activitySummary) string {
 	default:
 		return "Mixed load session; balanced training stimulus"
 	}
+}
+
+func renderRunningEconomy(s activitySummary) string {
+	return fmt.Sprintf(
+		"Running Economy\nAverage Cadence: %s spm\nVertical Oscillation: %s cm\nVertical Ratio: %s",
+		formatMetricValue(s.AvgCadence, "%.1f"),
+		formatMetricValue(s.VertOscCM, "%.1f"),
+		formatVerticalRatioValue(s.VertRatio),
+	)
 }
 
 func zoneStyle(idx int) lipgloss.Style {
@@ -1043,6 +1101,20 @@ func totalZoneMinutes(z [5]float64) float64 {
 	return total
 }
 
+func formatMetricValue(v float64, format string) string {
+	if v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return "n/a"
+	}
+	return fmt.Sprintf(format, v)
+}
+
+func formatVerticalRatioValue(v float64) string {
+	if v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return "n/a"
+	}
+	return colorVerticalRatio(v)
+}
+
 func renderMetricTrends(summaries []activitySummary) string {
 	now := time.Now()
 	last7Start := now.AddDate(0, 0, -7)
@@ -1141,4 +1213,39 @@ func waitForAsyncMsg(ch <-chan tea.Msg) tea.Cmd {
 		}
 		return msg
 	}
+}
+
+func (m *Model) toggleDashboardProvider() {
+	if m.dashProvider == "strava" {
+		if len(m.garminSumm) == 0 {
+			m.status = "Garmin dashboard source unavailable: no Garmin activities loaded."
+			return
+		}
+		m.dashProvider = "garmin"
+		m.status = "Dashboard source set to Garmin."
+		return
+	}
+	m.dashProvider = "strava"
+	m.status = "Dashboard source set to Strava."
+}
+
+func (m Model) dashboardSummaries() []activitySummary {
+	if m.dashProvider == "garmin" {
+		return m.garminSumm
+	}
+	return m.summaries
+}
+
+func (m Model) renderDashboardProviderSelector() string {
+	strava := tabStyle.Render("Strava")
+	garmin := tabStyle.Render("Garmin")
+	if m.dashProvider == "strava" {
+		strava = activeTabStyle.Render("Strava")
+	}
+	if len(m.garminSumm) == 0 {
+		garmin = mutedStyle.Render("Garmin (disabled)")
+	} else if m.dashProvider == "garmin" {
+		garmin = activeTabStyle.Render("Garmin")
+	}
+	return "Dashboard source (press p): " + strava + " " + garmin
 }

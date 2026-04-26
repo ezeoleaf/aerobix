@@ -15,6 +15,10 @@ type Activity struct {
 	HeartRate []float64
 	TimeSec   []int
 	SpeedMS   []float64
+
+	AvgCadence               float64
+	AvgVerticalOscillationCM float64
+	AvgStrideLengthM         float64
 }
 
 type AthleteProfile struct {
