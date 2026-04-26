@@ -475,7 +475,7 @@ func (m Model) renderDetails(s activitySummary) string {
 func (m Model) loadActivitiesCmd(forceRefresh bool) tea.Cmd {
 	m.loading = true
 	return func() tea.Msg {
-		activities, err := m.dataProvider.RecentActivities(20, forceRefresh)
+		activities, err := m.dataProvider.RecentActivities(0, forceRefresh)
 		return activitiesLoadedMsg{activities: activities, fetchInfo: m.dataProvider.FetchInfo(), err: err}
 	}
 }

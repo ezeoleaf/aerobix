@@ -180,30 +180,11 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 	if p.cfg.AccessToken == "" {
 		return nil, errors.New("not connected: get auth code in Settings and press x")
 	}
-	if limit <= 0 {
-		limit = 20
-	}
 	if err := p.ensureFreshToken(); err != nil {
 		return nil, err
 	}
 
-	u := fmt.Sprintf("%s/athlete/activities?per_page=%d&page=1", baseURL, limit)
-	req, _ := http.NewRequest(http.MethodGet, u, nil)
-	req.Header.Set("Authorization", "Bearer "+p.cfg.AccessToken)
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", err)
-		}
-	}()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("activities request failed: %s", resp.Status)
-	}
-
-	var raw []struct {
+	type rawActivity struct {
 		ID           int64   `json:"id"`
 		Name         string  `json:"name"`
 		SportType    string  `json:"sport_type"`
@@ -212,13 +193,52 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 		Distance     float64 `json:"distance"`
 		AverageWatts float64 `json:"average_watts"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, err
+	const perPage = 100
+	cutoff := time.Now().AddDate(0, 0, -42)
+	rawAll := make([]rawActivity, 0, perPage)
+	for page := 1; ; page++ {
+		u := fmt.Sprintf("%s/athlete/activities?per_page=%d&page=%d", baseURL, perPage, page)
+		req, _ := http.NewRequest(http.MethodGet, u, nil)
+		req.Header.Set("Authorization", "Bearer "+p.cfg.AccessToken)
+		resp, err := p.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode >= 300 {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("activities request failed: %s", resp.Status)
+		}
+		var batch []rawActivity
+		if err := json.NewDecoder(resp.Body).Decode(&batch); err != nil {
+			_ = resp.Body.Close()
+			return nil, err
+		}
+		if err := resp.Body.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to close response body: %v\n", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		rawAll = append(rawAll, batch...)
+
+		// Strava returns descending by date. Stop once we crossed 42-day window.
+		oldest := batch[len(batch)-1]
+		oldestTime, err := time.Parse(time.RFC3339, oldest.StartDate)
+		if err == nil && oldestTime.Before(cutoff) {
+			break
+		}
+		// Safety: do not fetch unbounded history even if parsing fails.
+		if page >= 10 {
+			break
+		}
 	}
 
-	activities := make([]domain.Activity, 0, len(raw))
-	for _, a := range raw {
+	activities := make([]domain.Activity, 0, len(rawAll))
+	for _, a := range rawAll {
 		start, _ := time.Parse(time.RFC3339, a.StartDate)
+		if start.Before(cutoff) {
+			continue
+		}
 		stream, _ := p.fetchStreams(a.ID)
 		if len(stream.TimeSec) == 0 {
 			stream = syntheticStreams(a.ElapsedTime, a.AverageWatts)
