@@ -51,23 +51,33 @@ type exchangeMsg struct {
 }
 
 type activitySummary struct {
-	Activity   domain.Activity
-	NP         float64
-	IF         float64
-	TSS        float64
-	TSSSource  string
-	TRIMP      float64
-	EFSpeed    float64
-	Decoupling float64
-	AvgHR      float64
-	AvgCadence float64
-	VertOscCM  float64
-	VertRatio  float64
-	AvgPace    string
-	Duration   string
-	Zones      [5]float64
-	ZoneBasis  string
-	HRZones    [5]float64
+	Activity        domain.Activity
+	NP              float64
+	IF              float64
+	TSS             float64
+	TSSSource       string
+	TRIMP           float64
+	EFSpeed         float64
+	Decoupling      float64
+	AvgHR           float64
+	AvgCadence      float64
+	VertOscCM       float64
+	VertRatio       float64
+	DecoupleAtMin   float64
+	DurabilityScore float64
+	HRStabilityPct  float64
+	CadenceStdDev   float64
+	CadenceDropPct  float64
+	FormBreakdown   bool
+	FormBreakdownAt float64
+	SessionClass    string
+	SessionConf     float64
+	RunExplanation  string
+	AvgPace         string
+	Duration        string
+	Zones           [5]float64
+	ZoneBasis       string
+	HRZones         [5]float64
 }
 
 var navItems = []string{"Dashboard", "Activities", "Garmin (Beta)", "Settings"}
@@ -480,14 +490,14 @@ func (m Model) renderDetails(s activitySummary) string {
 	}
 	if isRunSport(s.Activity.Sport) {
 		economyCard := cardStyle.Width(max(44, (m.width - 38))).Render(
-			renderRunningEconomy(s),
+			renderRunningEconomy(s) + "\n" + renderDurabilityBlock(s),
 		)
 		detailGrid = lipgloss.JoinVertical(lipgloss.Left, detailGrid, "\n"+economyCard)
 	}
 
 	return fmt.Sprintf(
-		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\nNP %.0f | IF %.2f | TSS %.1f (%s) | TRIMP %.1f | EF(speed/HR) %.4f\nDecoupling %.2f%%\nSession verdict: %s\n\n%s",
-		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, s.NP, s.IF, s.TSS, s.TSSSource, s.TRIMP, s.EFSpeed, s.Decoupling, verdict, detailGrid,
+		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\nNP %.0f | IF %.2f | TSS %.1f (%s) | TRIMP %.1f | EF(speed/HR) %.4f\nDecoupling %.2f%%\nSession type: %s (%s)\nSession verdict: %s\n%s\n\n%s",
+		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, s.NP, s.IF, s.TSS, s.TSSSource, s.TRIMP, s.EFSpeed, s.Decoupling, s.SessionClass, renderSessionConfidence(s.SessionConf), verdict, s.RunExplanation, detailGrid,
 	)
 }
 
@@ -712,24 +722,40 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 		decoupling, _ := physics.AerobicDecoupling(a)
 		efSpeed, _ := physics.SpeedEfficiencyFactor(a.SpeedMS, avgHR)
 		vertRatio, _ := physics.VerticalRatio(a.AvgVerticalOscillationCM, a.AvgStrideLengthM)
+		durability, _ := physics.AerobicDurability(a)
+		_, cadenceStdDev, cadenceDropPct, _ := physics.CadenceMetrics(a)
+		formBreakdown, _ := physics.DetectFormBreakdown(a)
+		sessionClass := physics.ClassifySession(a, hrZones)
+		sessionConf := physics.SessionClassificationConfidence(a, hrZones, sessionClass)
+		runExplanation := physics.ExplainRun(sessionClass, durability, formBreakdown, cadenceDropPct)
 		out = append(out, activitySummary{
-			Activity:   a,
-			NP:         np,
-			IF:         ifVal,
-			TSS:        tss,
-			TSSSource:  tssSource,
-			TRIMP:      trimp,
-			EFSpeed:    efSpeed,
-			Decoupling: decoupling,
-			AvgHR:      avgHR,
-			AvgCadence: a.AvgCadence,
-			VertOscCM:  a.AvgVerticalOscillationCM,
-			VertRatio:  vertRatio,
-			AvgPace:    formatPace(a.Sport, a.DistanceKM, a.Duration),
-			Duration:   formatDurationCompact(a.Duration),
-			Zones:      zones,
-			ZoneBasis:  basis,
-			HRZones:    hrZones,
+			Activity:        a,
+			NP:              np,
+			IF:              ifVal,
+			TSS:             tss,
+			TSSSource:       tssSource,
+			TRIMP:           trimp,
+			EFSpeed:         efSpeed,
+			Decoupling:      decoupling,
+			AvgHR:           avgHR,
+			AvgCadence:      a.AvgCadence,
+			VertOscCM:       a.AvgVerticalOscillationCM,
+			VertRatio:       vertRatio,
+			DecoupleAtMin:   durability.DecouplingStartMinutes,
+			DurabilityScore: durability.Score,
+			HRStabilityPct:  durability.HRStabilityPct,
+			CadenceStdDev:   cadenceStdDev,
+			CadenceDropPct:  cadenceDropPct,
+			FormBreakdown:   formBreakdown.Detected,
+			FormBreakdownAt: formBreakdown.StartMin,
+			SessionClass:    sessionClass,
+			SessionConf:     sessionConf,
+			RunExplanation:  runExplanation,
+			AvgPace:         formatPace(a.Sport, a.DistanceKM, a.Duration),
+			Duration:        formatDurationCompact(a.Duration),
+			Zones:           zones,
+			ZoneBasis:       basis,
+			HRZones:         hrZones,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Activity.StartTime.After(out[j].Activity.StartTime) })
@@ -971,10 +997,26 @@ func sessionVerdict(s activitySummary) string {
 
 func renderRunningEconomy(s activitySummary) string {
 	return fmt.Sprintf(
-		"Running Economy\nAverage Cadence: %s spm\nVertical Oscillation: %s cm\nVertical Ratio: %s",
+		"Running Economy\nAverage Cadence: %s spm\nCadence consistency (sd): %s spm\nCadence drop late run: %s\nVertical Oscillation: %s cm\nVertical Ratio: %s",
 		formatMetricValue(s.AvgCadence, "%.1f"),
+		formatMetricValue(s.CadenceStdDev, "%.2f"),
+		formatPercentValue(s.CadenceDropPct),
 		formatMetricValue(s.VertOscCM, "%.1f"),
 		formatVerticalRatioValue(s.VertRatio),
+	)
+}
+
+func renderDurabilityBlock(s activitySummary) string {
+	breakdown := "not detected"
+	if s.FormBreakdown {
+		breakdown = formatMinutesValue(s.FormBreakdownAt)
+	}
+	return fmt.Sprintf(
+		"\nAerobic Durability\nTime to decoupling: %s\nHR stability: %s\nDurability score: %s\nForm breakdown: %s",
+		formatMinutesValue(s.DecoupleAtMin),
+		formatPercentValue(s.HRStabilityPct),
+		colorDurabilityScore(s.DurabilityScore),
+		breakdown,
 	)
 }
 
@@ -1113,6 +1155,46 @@ func formatVerticalRatioValue(v float64) string {
 		return "n/a"
 	}
 	return colorVerticalRatio(v)
+}
+
+func formatPercentValue(v float64) string {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f%%", v)
+}
+
+func formatMinutesValue(v float64) string {
+	if v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return "not detected"
+	}
+	return fmt.Sprintf("%.0f min", v)
+}
+
+func colorDurabilityScore(v float64) string {
+	if v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return "n/a"
+	}
+	txt := fmt.Sprintf("%.0f/100", v)
+	switch {
+	case v >= 80:
+		return goodStyle.Render(txt)
+	case v >= 60:
+		return warnStyle.Render(txt)
+	default:
+		return badStyle.Render(txt)
+	}
+}
+
+func renderSessionConfidence(v float64) string {
+	switch {
+	case v >= 0.8:
+		return goodStyle.Render("high confidence")
+	case v >= 0.6:
+		return warnStyle.Render("medium confidence")
+	default:
+		return badStyle.Render("low confidence")
+	}
 }
 
 func renderMetricTrends(summaries []activitySummary) string {

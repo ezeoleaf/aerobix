@@ -15,6 +15,7 @@ type Activity struct {
 	HeartRate []float64
 	TimeSec   []int
 	SpeedMS   []float64
+	Cadence   []float64
 
 	AvgCadence               float64
 	AvgVerticalOscillationCM float64

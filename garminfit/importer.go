@@ -189,6 +189,7 @@ func parseFITFile(path string) (domain.Activity, error) {
 	hr := make([]float64, 0, len(activity.Records))
 	timeSec := make([]int, 0, len(activity.Records))
 	speed := make([]float64, 0, len(activity.Records))
+	cadence := make([]float64, 0, len(activity.Records))
 	cadenceSamples := make([]float64, 0, len(activity.Records))
 	voSamplesCM := make([]float64, 0, len(activity.Records))
 	strideSamplesM := make([]float64, 0, len(activity.Records))
@@ -208,9 +209,18 @@ func parseFITFile(path string) (domain.Activity, error) {
 		speed = append(speed, sanitizeUint32Speed(r.EnhancedSpeed))
 
 		if c, ok := lookupRecordMetric(r, []string{"Cadence", "EnhancedCadence"}); ok {
-			if c = sanitizeCadence(c); c > 0 {
+			c = sanitizeCadence(c)
+			if isRunLikeSport(sport) && c > 0 && c < 130 {
+				// Many FIT files store running cadence as steps per minute per leg.
+				// Convert to total spm for UI/analysis consistency.
+				c = c * 2
+			}
+			cadence = append(cadence, c)
+			if c > 0 {
 				cadenceSamples = append(cadenceSamples, c)
 			}
+		} else {
+			cadence = append(cadence, 0)
 		}
 		if vo, ok := lookupRecordMetric(r, []string{"VerticalOscillation", "EnhancedVerticalOscillation"}); ok {
 			if voCM := sanitizeVerticalOscillationCM(vo); voCM > 0 {
@@ -247,6 +257,7 @@ func parseFITFile(path string) (domain.Activity, error) {
 		HeartRate:                hr,
 		TimeSec:                  timeSec,
 		SpeedMS:                  speed,
+		Cadence:                  cadence,
 		AvgCadence:               avgCadence,
 		AvgVerticalOscillationCM: avgVerticalOscillationCM,
 		AvgStrideLengthM:         avgStrideLengthM,
@@ -390,6 +401,11 @@ func meanOrZero(v []float64) float64 {
 		sum += x
 	}
 	return sum / float64(len(v))
+}
+
+func isRunLikeSport(sport string) bool {
+	s := strings.ToLower(strings.TrimSpace(sport))
+	return strings.Contains(s, "run") || strings.Contains(s, "trail") || strings.Contains(s, "walk")
 }
 
 func collectFITFiles(dir string) ([]string, error) {

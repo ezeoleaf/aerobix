@@ -1,18 +1,36 @@
 # Roadmap
 
+## Done Recently
+
+- [x] Strava OAuth + local token persistence
+- [x] Strava activity cache with refresh indicator
+- [x] Garmin FIT import tab with concurrent parsing + progress + dedupe
+- [x] Dashboard source selector (`Strava` / `Garmin`)
+- [x] Improved run metrics when power is missing (HR-based fallbacks)
+- [x] Running Economy panel (cadence, vertical oscillation, vertical ratio)
+- [x] Aerobic durability metrics:
+  - time-to-decoupling
+  - durability score
+  - HR stability
+- [x] Form breakdown detection (cadence down + HR up + pace down)
+- [x] Session classification + confidence labels
+- [x] Explain-the-run narrative in activity details
+
 ## Near Term
 
-- [ ] Provider switcher in Settings (`Strava` / `Mock`)
-- [ ] Better run handling when power is missing
-- [ ] Persist last selected view and cursor positions
-- [ ] Unit tests for key metrics (`NP`, `TSS`, `Decoupling`, `PMC`)
+- [ ] Add unit tests for key metric engines (`NP`, `TSS`, `Decoupling`, `Durability`, `Classification`)
+- [ ] Surface classification confidence details (why this label won)
+- [ ] Add configurable classification thresholds in Settings (run/trail specific)
+- [ ] Improve run explanation with clearer training-effect tags (base / tempo / threshold)
+- [ ] Add durability trend view across recent runs
 
 ## Mid Term
 
-- [ ] Garmin provider support
-- [ ] Local FIT/TCX import with goroutine worker pool
-- [ ] Athlete-configurable zone models (power + HR)
-- [ ] Better trend charts (weekly load, monotony, strain)
+- [ ] Terrain-aware metrics (GAP, uphill efficiency, downhill damage proxy)
+- [ ] Better load analytics (monotony, strain, ramp rate)
+- [ ] Ground contact time (GCT) + asymmetry support (when FIT data exists)
+- [ ] Running Stress Score (RSS) for running power files
+- [ ] Recovery index using resting HR/HRV FIT artifacts (if available)
 
 ## Longer Term
 

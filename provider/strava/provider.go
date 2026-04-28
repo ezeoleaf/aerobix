@@ -256,6 +256,7 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 			HeartRate:  stream.HeartRate,
 			TimeSec:    stream.TimeSec,
 			SpeedMS:    stream.SpeedMS,
+			Cadence:    stream.Cadence,
 			AvgCadence: a.AverageCadence,
 			AvgStrideLengthM: estimateStrideLengthFromSpeedCadence(
 				a.Distance,
@@ -288,11 +289,12 @@ type streamData struct {
 	HeartRate []float64
 	TimeSec   []int
 	SpeedMS   []float64
+	Cadence   []float64
 }
 
 func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 	var out streamData
-	u := fmt.Sprintf("%s/activities/%d/streams?keys=time,watts,heartrate,velocity_smooth&key_by_type=true", baseURL, activityID)
+	u := fmt.Sprintf("%s/activities/%d/streams?keys=time,watts,heartrate,velocity_smooth,cadence&key_by_type=true", baseURL, activityID)
 	req, _ := http.NewRequest(http.MethodGet, u, nil)
 	req.Header.Set("Authorization", "Bearer "+p.cfg.AccessToken)
 	resp, err := p.http.Do(req)
@@ -318,6 +320,7 @@ func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 	watts := raw["watts"].Data
 	hr := raw["heartrate"].Data
 	speed := raw["velocity_smooth"].Data
+	cadence := raw["cadence"].Data
 
 	n := len(timeF)
 	if n == 0 {
@@ -327,6 +330,7 @@ func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 	out.HeartRate = make([]float64, n)
 	out.TimeSec = make([]int, n)
 	out.SpeedMS = make([]float64, n)
+	out.Cadence = make([]float64, n)
 	for i := 0; i < n; i++ {
 		out.TimeSec[i] = int(timeF[i])
 		if i < len(watts) {
@@ -337,6 +341,9 @@ func (p *Provider) fetchStreams(activityID int64) (streamData, error) {
 		}
 		if i < len(speed) {
 			out.SpeedMS[i] = speed[i]
+		}
+		if i < len(cadence) {
+			out.Cadence[i] = cadence[i]
 		}
 	}
 	return out, nil

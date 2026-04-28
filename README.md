@@ -4,7 +4,7 @@ A terminal-first training analytics app for endurance athletes.
 
 <img width="1704" height="954" alt="image" src="https://github.com/user-attachments/assets/c4840348-2e10-45f1-9ca6-1b530b3fcd62" />
 
-Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data (currently Strava), computes training metrics, and visualizes your fitness trends directly in the terminal.
+Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data (Strava + Garmin FIT import), computes training metrics, and visualizes fitness trends directly in the terminal.
 
 ## Features
 
@@ -12,6 +12,7 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
 - Strava OAuth integration with local token persistence
 - Local activity caching (instant startup if cache exists)
 - Mock provider fallback for offline/dev usage
+- Dashboard source selector (`Strava` / `Garmin`, with Garmin auto-disabled if no data loaded)
 - Core performance metrics:
   - Normalized Power (NP)
   - Efficiency Factor (EF speed/HR)
@@ -21,9 +22,24 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
   - Critical Speed (CS) + D' for running
   - Aerobic Decoupling (Pw:HR)
   - CTL / ATL / TSB (Performance Management Chart model)
+- Garmin-first running analytics:
+  - Time-to-decoupling detection
+  - Aerobic durability score
+  - Cadence consistency + late-run cadence drop
+  - Form breakdown detection (pace + HR + cadence pattern)
+  - Session classification with confidence labels
+  - "Explain the run" narrative summary
 - Activity details:
-  - Sparkline (power or HR depending on available data)
   - Time in zones (power-based) + HR zones for runs
+  - Running Economy panel:
+    - Average cadence
+    - Vertical oscillation
+    - Vertical ratio (color-coded)
+  - Aerobic Durability panel:
+    - Time to decoupling
+    - HR stability
+    - Durability score
+    - Form breakdown timing
 - Garmin (Beta):
   - Import local `.fit` files from a folder
   - Parse activities concurrently and display in dedicated tab
@@ -48,6 +64,12 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
   - Detects a steady-state segment first
   - Compares `(avg power / avg HR)` first half vs second half  
   Rule of thumb: `<5%` strong aerobic durability, `5-10%` moderate drift, `>10%` significant drift.
+- **Time to decoupling**:
+  - Estimates when pace/HR efficiency starts to meaningfully drift.
+  - Useful for pacing and durability progression.
+- **Aerobic durability score**:
+  - Composite signal (drift severity, drift onset timing, HR stability).
+  - Displayed as a 0-100 score in run details.
 - **CTL/ATL/TSB**:
   - EWMA over 42d (CTL) and 7d (ATL), `TSB = CTL - ATL`
   - CTL = long-term fitness, ATL = short-term fatigue, TSB = readiness/form
@@ -57,6 +79,15 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
 - **Critical Speed (CS) / D'**:
   - Running analog to FTP derived from best sustained speeds.
   - Aerobix estimates from best 3min and 9min efforts across your run set.
+- **Session classification**:
+  - Labels sessions as recovery/easy/tempo/threshold/long/steady using HR-zone distribution + duration + variability rules.
+  - Includes confidence (high/medium/low) to make edge cases explicit.
+- **Running Economy**:
+  - **Vertical Ratio** = `vertical oscillation / stride length`.
+  - Rule of thumb:
+    - `<7%` efficient (green)
+    - `7-9%` moderate (yellow)
+    - `>9%` likely excess vertical motion (red)
  
 ## Look
 <img width="865" height="670" alt="image" src="https://github.com/user-attachments/assets/d0157b24-a915-4166-841c-048467260e7a" />  \
@@ -114,8 +145,10 @@ Strava config/tokens are stored at:
 
 - Global:
   - `q` quit
-  - `r` reload activities
-  - `h`/`l` or left/right arrows: switch sidebar section
+  - `r` reload Strava activities
+  - `g` reload Garmin FIT import
+  - `h`/`l` or left/right arrows: switch tabs
+  - `p` toggle dashboard source (on Dashboard tab)
 - Activities:
   - `j`/`k` or down/up arrows: move selection
 - Settings:
@@ -125,7 +158,7 @@ Strava config/tokens are stored at:
   - `x` exchange auth code
   - in edit mode: `Enter` save field, `Esc` cancel
 - Garmin (Beta):
-  - `g` import `.fit` files from `Garmin FIT dir`
+  - `g` import/reload `.fit` files from `Garmin FIT dir`
 
 ## Current Project Layout
 
