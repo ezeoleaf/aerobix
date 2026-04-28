@@ -23,6 +23,8 @@
 - [ ] Add configurable classification thresholds in Settings (run/trail specific)
 - [ ] Improve run explanation with clearer training-effect tags (base / tempo / threshold)
 - [ ] Add durability trend view across recent runs
+- [ ] Add support for Coros (fit files)
+- [ ] Add support for Polar (fit files)
 
 ## Mid Term
 
