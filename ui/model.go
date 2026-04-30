@@ -902,13 +902,6 @@ func max(a, b int) int {
 	return b
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func deriveZones(a domain.Activity, ftp float64, hrBounds [4]float64) ([5]float64, string) {
 	if hasUsablePower(a.Power) && len(a.Power) == len(a.TimeSec) {
 		if z, err := physics.TimeInPowerZonesMinutes(a.Power, a.TimeSec, ftp); err == nil {
