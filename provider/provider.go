@@ -12,6 +12,7 @@ type Settings struct {
 	HRZone3Max   float64
 	HRZone4Max   float64
 	GarminFITDir string
+	RunOnly      bool
 	ClientID     string
 	ClientSecret string
 	Configured   bool

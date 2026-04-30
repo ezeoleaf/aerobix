@@ -33,6 +33,7 @@ type config struct {
 	HRZone3Max   float64 `json:"hr_zone_3_max"`
 	HRZone4Max   float64 `json:"hr_zone_4_max"`
 	GarminFITDir string  `json:"garmin_fit_dir"`
+	RunOnly      bool    `json:"run_only"`
 	ClientID     string  `json:"client_id"`
 	ClientSecret string  `json:"client_secret"`
 	AccessToken  string  `json:"access_token"`
@@ -84,6 +85,7 @@ func (p Provider) Settings() provider.Settings {
 		HRZone3Max:   p.cfg.HRZone3Max,
 		HRZone4Max:   p.cfg.HRZone4Max,
 		GarminFITDir: p.cfg.GarminFITDir,
+		RunOnly:      p.cfg.RunOnly,
 		ClientID:     p.cfg.ClientID,
 		ClientSecret: p.cfg.ClientSecret,
 		Configured:   p.cfg.ClientID != "" && p.cfg.ClientSecret != "",
@@ -105,6 +107,7 @@ func (p *Provider) UpdateSettings(s provider.Settings) error {
 	p.cfg.HRZone3Max = s.HRZone3Max
 	p.cfg.HRZone4Max = s.HRZone4Max
 	p.cfg.GarminFITDir = strings.TrimSpace(s.GarminFITDir)
+	p.cfg.RunOnly = s.RunOnly
 	p.cfg.ClientID = strings.TrimSpace(s.ClientID)
 	p.cfg.ClientSecret = strings.TrimSpace(s.ClientSecret)
 	return p.save()
@@ -171,7 +174,7 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 	if !forceRefresh {
 		if cached, fetchedAt, err := p.loadCachedActivities(limit); err == nil && len(cached) > 0 {
 			p.fetchInfo = provider.FetchInfo{
-				Source:    "cache",
+				Source:    "Strava cache",
 				FetchedAt: fetchedAt.Format(time.RFC3339),
 			}
 			return cached, nil
@@ -256,18 +259,18 @@ func (p *Provider) RecentActivities(limit int, forceRefresh bool) ([]domain.Acti
 			HeartRate:  stream.HeartRate,
 			TimeSec:    stream.TimeSec,
 			SpeedMS:    stream.SpeedMS,
-			Cadence:    stream.Cadence,
-			AvgCadence: a.AverageCadence,
+			Cadence:    normalizeRunCadenceSeries(a.SportType, stream.Cadence),
+			AvgCadence: normalizeRunCadence(a.SportType, a.AverageCadence),
 			AvgStrideLengthM: estimateStrideLengthFromSpeedCadence(
 				a.Distance,
 				a.ElapsedTime,
-				a.AverageCadence,
+				normalizeRunCadence(a.SportType, a.AverageCadence),
 			),
 		})
 	}
 	_ = p.saveCachedActivities(activities)
 	p.fetchInfo = provider.FetchInfo{
-		Source:    "strava",
+		Source:    "Strava API",
 		FetchedAt: time.Now().Format(time.RFC3339),
 	}
 	return activities, nil
@@ -282,6 +285,32 @@ func estimateStrideLengthFromSpeedCadence(distanceMeters float64, elapsedSec int
 		return 0
 	}
 	return (avgSpeedMS * 60.0) / cadenceSPM
+}
+
+func normalizeRunCadence(sport string, cadence float64) float64 {
+	if !isRunLikeSport(sport) || cadence <= 0 {
+		return cadence
+	}
+	if cadence < 130 {
+		return cadence * 2
+	}
+	return cadence
+}
+
+func normalizeRunCadenceSeries(sport string, cadence []float64) []float64 {
+	if len(cadence) == 0 {
+		return cadence
+	}
+	out := make([]float64, len(cadence))
+	for i, c := range cadence {
+		out[i] = normalizeRunCadence(sport, c)
+	}
+	return out
+}
+
+func isRunLikeSport(sport string) bool {
+	s := strings.ToLower(strings.TrimSpace(sport))
+	return strings.Contains(s, "run") || strings.Contains(s, "trail") || strings.Contains(s, "walk")
 }
 
 type streamData struct {

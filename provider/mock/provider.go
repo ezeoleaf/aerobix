@@ -46,6 +46,7 @@ func (p Provider) Settings() provider.Settings {
 		FTP:          265,
 		Age:          30,
 		GarminFITDir: "",
+		RunOnly:      false,
 		Configured:   true,
 		Connected:    true,
 	}

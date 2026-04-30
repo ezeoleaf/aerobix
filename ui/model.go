@@ -80,6 +80,16 @@ type activitySummary struct {
 	HRZones         [5]float64
 }
 
+type dashboardDelta struct {
+	Has  bool
+	CTL  float64
+	ATL  float64
+	TSB  float64
+	CTLP float64
+	ATLP float64
+	TSBP float64
+}
+
 var navItems = []string{"Dashboard", "Activities", "Garmin (Beta)", "Settings"}
 
 type Model struct {
@@ -96,14 +106,18 @@ type Model struct {
 	profile      domain.AthleteProfile
 
 	activities    []domain.Activity
+	rawActivities []domain.Activity
 	summaries     []activitySummary
 	pmc           []physics.PMCPoint
 	activityTable table.Model
 	garminActs    []domain.Activity
+	rawGarminActs []domain.Activity
 	garminSumm    []activitySummary
 	garminTable   table.Model
 	garminCursor  int
 	dashProvider  string
+	preReload     map[string]physics.PMCPoint
+	dashDelta     map[string]dashboardDelta
 
 	settingsCursor int
 	editMode       bool
@@ -125,6 +139,8 @@ func NewModel(dataProvider provider.DataProvider) Model {
 		status:         "Press r to reload activities.",
 		settingsCursor: 0,
 		dashProvider:   "strava",
+		preReload:      map[string]physics.PMCPoint{},
+		dashDelta:      map[string]dashboardDelta{},
 	}
 }
 
@@ -148,14 +164,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Load failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.activities = msg.activities
-		m.summaries = buildSummaries(msg.activities, m.settings)
-		m.pmc = buildPMC(m.summaries)
-		m.activityTable = newActivityTable(m.summaries)
-		if m.activityCursor >= len(m.summaries) {
-			m.activityCursor = max(len(m.summaries)-1, 0)
-		}
-		m.activityTable.SetCursor(m.activityCursor)
+		m.rawActivities = msg.activities
+		m.applyFilters()
+		m.updateDashboardDelta("strava")
 		m.status = fmt.Sprintf("Loaded %d activities from %s.", len(m.activities), m.dataProvider.Name())
 		if msg.fetchInfo.Source != "" {
 			m.fetchInfo = msg.fetchInfo
@@ -197,13 +208,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Garmin load failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.garminActs = msg.result.Activities
-		m.garminSumm = buildSummaries(msg.result.Activities, m.settings)
-		m.garminTable = newActivityTable(m.garminSumm)
-		if m.garminCursor >= len(m.garminSumm) {
-			m.garminCursor = max(len(m.garminSumm)-1, 0)
-		}
-		m.garminTable.SetCursor(m.garminCursor)
+		m.rawGarminActs = msg.result.Activities
+		m.applyFilters()
+		m.updateDashboardDelta("garmin")
 		m.status = fmt.Sprintf(
 			"Garmin import: %d files | %d parsed | %d failed | %d deduped | %d ready.",
 			msg.result.TotalFiles,
@@ -221,9 +228,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "r":
+			m.captureReloadBaseline("strava")
 			m.loading = true
 			return m, tea.Batch(m.loadActivitiesCmd(true), spinnerTickCmd())
 		case "g":
+			m.captureReloadBaseline("garmin")
 			m.loading = true
 			return m, tea.Batch(m.startGarminImportCmd(), spinnerTickCmd())
 		case "p":
@@ -265,7 +274,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activityTable.MoveDown(1)
 				m.activityTable.UpdateViewport()
 			}
-			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 11 {
+			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 12 {
 				m.settingsCursor++
 			}
 			if navItems[m.navCursor] == "Garmin (Beta)" {
@@ -412,9 +421,10 @@ func (m Model) renderDashboard() string {
 	weekly := subtleBoxStyle.Render(renderWeeklySummary(currentSummaries))
 	runPerf := subtleBoxStyle.Render(renderRunPerformanceSummary(currentSummaries))
 	trends := subtleBoxStyle.Render(renderMetricTrends(currentSummaries))
+	deltas := subtleBoxStyle.Render(m.renderDashboardDelta())
 	explain := subtleBoxStyle.Render(renderMeaningLegend(last))
 	selector := subtleBoxStyle.Render(m.renderDashboardProviderSelector())
-	return titleStyle.Render("Dashboard") + "\n\n" + selector + "\n\n" + top + "\n\n" + readiness + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
+	return titleStyle.Render("Dashboard") + "\n\n" + selector + "\n\n" + top + "\n\n" + readiness + "\n\n" + deltas + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
 }
 
 func (m Model) renderActivities() string {
@@ -444,6 +454,7 @@ func (m Model) renderSettings() string {
 		fmt.Sprintf("HR Z3 max (bpm): %.0f", m.settings.HRZone3Max),
 		fmt.Sprintf("HR Z4 max (bpm): %.0f", m.settings.HRZone4Max),
 		fmt.Sprintf("Garmin FIT dir: %s", maskIfNeeded(m.settings.GarminFITDir, false)),
+		fmt.Sprintf("Run activities only: %t", m.settings.RunOnly),
 		fmt.Sprintf("Client ID: %s", maskIfNeeded(m.settings.ClientID, false)),
 		fmt.Sprintf("Client Secret: %s", maskIfNeeded(m.settings.ClientSecret, true)),
 		fmt.Sprintf("Auth Code: %s", maskIfNeeded(m.currentAuthCode(), false)),
@@ -550,12 +561,7 @@ func (m *Model) persistSettings() error {
 		return err
 	}
 	m.profile = m.dataProvider.AthleteProfile()
-	if len(m.activities) > 0 {
-		m.summaries = buildSummaries(m.activities, m.settings)
-		m.pmc = buildPMC(m.summaries)
-		m.activityTable = newActivityTable(m.summaries)
-		m.activityTable.SetCursor(minInt(m.activityCursor, max(len(m.summaries)-1, 0)))
-	}
+	m.applyFilters()
 	return nil
 }
 
@@ -580,8 +586,10 @@ func (m Model) currentSettingValue() string {
 	case 8:
 		return m.settings.GarminFITDir
 	case 9:
-		return m.settings.ClientID
+		return strconv.FormatBool(m.settings.RunOnly)
 	case 10:
+		return m.settings.ClientID
+	case 11:
 		return m.settings.ClientSecret
 	default:
 		return m.currentAuthCode()
@@ -623,10 +631,14 @@ func (m *Model) applyCurrentSetting(v string) {
 	case 8:
 		m.settings.GarminFITDir = strings.TrimSpace(v)
 	case 9:
-		m.settings.ClientID = strings.TrimSpace(v)
+		if b, err := strconv.ParseBool(strings.ToLower(strings.TrimSpace(v))); err == nil {
+			m.settings.RunOnly = b
+		}
 	case 10:
-		m.settings.ClientSecret = strings.TrimSpace(v)
+		m.settings.ClientID = strings.TrimSpace(v)
 	case 11:
+		m.settings.ClientSecret = strings.TrimSpace(v)
+	case 12:
 		m.status = "Auth code captured. Press x to exchange."
 		m.setAuthCode(v)
 	}
@@ -1330,4 +1342,107 @@ func (m Model) renderDashboardProviderSelector() string {
 		garmin = activeTabStyle.Render("Garmin")
 	}
 	return "Dashboard source (press p): " + strava + " " + garmin
+}
+
+func (m *Model) applyFilters() {
+	m.activities = filterActivitiesBySettings(m.rawActivities, m.settings)
+	m.garminActs = filterActivitiesBySettings(m.rawGarminActs, m.settings)
+
+	m.summaries = buildSummaries(m.activities, m.settings)
+	m.garminSumm = buildSummaries(m.garminActs, m.settings)
+	m.pmc = buildPMC(m.summaries)
+
+	m.activityTable = newActivityTable(m.summaries)
+	if m.activityCursor >= len(m.summaries) {
+		m.activityCursor = max(len(m.summaries)-1, 0)
+	}
+	m.activityTable.SetCursor(m.activityCursor)
+
+	m.garminTable = newActivityTable(m.garminSumm)
+	if m.garminCursor >= len(m.garminSumm) {
+		m.garminCursor = max(len(m.garminSumm)-1, 0)
+	}
+	m.garminTable.SetCursor(m.garminCursor)
+}
+
+func filterActivitiesBySettings(activities []domain.Activity, settings provider.Settings) []domain.Activity {
+	if !settings.RunOnly {
+		return activities
+	}
+	filtered := make([]domain.Activity, 0, len(activities))
+	for _, a := range activities {
+		if isRunSport(a.Sport) {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
+}
+
+func (m *Model) captureReloadBaseline(providerKey string) {
+	if p, ok := latestPMCForProvider(m, providerKey); ok {
+		m.preReload[providerKey] = p
+	}
+}
+
+func (m *Model) updateDashboardDelta(providerKey string) {
+	before, ok := m.preReload[providerKey]
+	if !ok {
+		return
+	}
+	after, ok := latestPMCForProvider(m, providerKey)
+	if !ok {
+		return
+	}
+	m.dashDelta[providerKey] = dashboardDelta{
+		Has:  true,
+		CTL:  after.CTL - before.CTL,
+		ATL:  after.ATL - before.ATL,
+		TSB:  after.TSB - before.TSB,
+		CTLP: pctChange(before.CTL, after.CTL),
+		ATLP: pctChange(before.ATL, after.ATL),
+		TSBP: pctChange(before.TSB, after.TSB),
+	}
+	delete(m.preReload, providerKey)
+}
+
+func latestPMCForProvider(m *Model, providerKey string) (physics.PMCPoint, bool) {
+	var summaries []activitySummary
+	if providerKey == "garmin" {
+		summaries = m.garminSumm
+	} else {
+		summaries = m.summaries
+	}
+	pmc := buildPMC(summaries)
+	if len(pmc) == 0 {
+		return physics.PMCPoint{}, false
+	}
+	return pmc[len(pmc)-1], true
+}
+
+func pctChange(before, after float64) float64 {
+	if before == 0 {
+		return 0
+	}
+	return ((after - before) / math.Abs(before)) * 100.0
+}
+
+func (m Model) renderDashboardDelta() string {
+	key := m.dashProvider
+	delta, ok := m.dashDelta[key]
+	if !ok || !delta.Has {
+		return "Change since last reload: n/a (reload current provider to populate)."
+	}
+	return fmt.Sprintf(
+		"Change since last reload\nCTL %s (%+.1f%%) | ATL %s (%+.1f%%) | TSB %s (%+.1f%%)",
+		fmtSigned(delta.CTL),
+		delta.CTLP,
+		fmtSigned(delta.ATL),
+		delta.ATLP,
+		fmtSigned(delta.TSB),
+		delta.TSBP,
+	)
+}
+
+func fmtSigned(v float64) string {
+	return fmt.Sprintf("%+.1f", v)
 }
