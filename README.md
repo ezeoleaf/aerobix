@@ -8,11 +8,12 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
 
 ## Features
 
-- Top-tab navigation (`Dashboard`, `Activities`, `Garmin (Beta)`, `Settings`)
+- Top-tab navigation (`Dashboard`, `Activities`, `Garmin (Beta)`, `Settings`); `P` opens a profile switcher
 - Strava OAuth integration with local token persistence
 - Local activity caching (instant startup if cache exists)
 - Mock provider fallback for offline/dev usage
 - Dashboard source selector (`Strava` / `Garmin`, with Garmin auto-disabled if no data loaded)
+- Dashboard load analytics (7d): monotony, strain, CTL ramp (see Metrics Notes)
 - Core performance metrics:
   - Normalized Power (NP)
   - Efficiency Factor (EF speed/HR)
@@ -82,6 +83,10 @@ Aerobix is a Go TUI built with Bubble Tea + Lip Gloss that fetches activity data
 - **Session classification**:
   - Labels sessions as recovery/easy/tempo/threshold/long/steady using HR-zone distribution + duration + variability rules.
   - Includes confidence (high/medium/low) to make edge cases explicit.
+- **Load analytics (7d)**:
+  - **Monotony**: ratio of mean daily TSS to its variability over the last week (high ≈ repetitive stress).
+  - **Strain**: weekly TSS scaled by monotony (Foster-style intuition).
+  - **CTL ramp**: average daily change in CTL over the last 7 days.
 - **Running Economy**:
   - **Vertical Ratio** = `vertical oscillation / stride length`.
   - Rule of thumb:
@@ -117,8 +122,29 @@ If Strava provider cannot initialize, Aerobix falls back to mock data.
 - Fresh Strava fetch happens when:
   - cache is missing, or
   - you press `r` to reload.
-- Cache file:
-  - macOS/Linux: `~/.config/aerobix/activities_cache.json`
+- Cache file is **per profile** under the app data directory, e.g. `…/aerobix/profiles/<id>/cache.json`  
+  (legacy top-level `activities_cache.json` is migrated into `profiles/default/` on first launch.)
+
+## Multi-profile storage
+
+Data lives under an OS-specific config directory as **`…/aerobix/`** (JSON on disk; no separate database for this CLI):
+
+- **Linux (typical):** `~/.config/aerobix/`
+- **macOS (typical):** `~/Library/Application Support/aerobix/` — Go’s config dir is *not* `~/.config` unless you opt in (see below).
+- **Override:** set `XDG_CONFIG_HOME` to use `$XDG_CONFIG_HOME/aerobix/` on any OS.
+
+- **Global:** `config.json` stores `active_profile` (which folder to load on next launch).
+- **Per athlete:** `profiles/<profile_id>/`
+  - `data.json` — Strava tokens + athlete settings (FTP, zones, etc.)
+  - `cache.json` — cached Strava activities
+  - `garmin/` — default folder for FIT import when “Garmin FIT dir” is left at the default
+
+Optional Coros/Polar (future) can mirror Garmin as extra subfolders under the same profile, e.g. `profiles/alice/coros/`.
+
+**Switch profile:** press **`P`** and choose a folder under `profiles/`, or edit **Profile ID** in Settings and Save (`s`).  
+Override for one launch: `AEROBIX_PROFILE=alice go run .` (overrides `config.json` until unset).
+
+Existing installs: first run **migrates** old `strava.json` + `activities_cache.json` into `profiles/default/`.
 
 ## Strava Setup
 
@@ -137,14 +163,13 @@ If Strava provider cannot initialize, Aerobix falls back to mock data.
 7. Paste code into `Auth Code` field.
 8. Press `x` to exchange code and load activities.
 
-Strava config/tokens are stored at:
-
-- macOS/Linux: `~/.config/aerobix/strava.json`
+Strava config/tokens are stored per profile at `…/aerobix/profiles/<id>/data.json` (see paths above).
 
 ## Keybindings
 
 - Global:
   - `q` quit
+  - `P` switch profile (modal)
   - `r` reload Strava activities
   - `g` reload Garmin FIT import
   - `h`/`l` or left/right arrows: switch tabs
@@ -153,6 +178,7 @@ Strava config/tokens are stored at:
   - `j`/`k` or down/up arrows: move selection
 - Settings:
   - `e` edit selected field
+  - `o` toggle Run activities only
   - `s` save settings
   - `a` open auth URL
   - `x` exchange auth code
@@ -165,6 +191,7 @@ Strava config/tokens are stored at:
 ```text
 .
 ├── domain/
+├── paths/
 ├── physics/
 ├── provider/
 │   ├── mock/

@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"aerobix/paths"
 	"aerobix/provider"
 	"aerobix/provider/mock"
 	"aerobix/provider/strava"
@@ -12,6 +13,9 @@ import (
 )
 
 func main() {
+	if err := paths.MigrateLegacy(); err != nil {
+		log.Printf("aerobix: profile migration: %v", err)
+	}
 	dataProvider := buildProvider()
 
 	program := tea.NewProgram(ui.NewModel(dataProvider), tea.WithAltScreen())

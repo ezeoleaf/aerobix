@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"aerobix/domain"
+	"aerobix/paths"
 	"aerobix/provider"
 )
 
@@ -42,6 +43,7 @@ type config struct {
 }
 
 type Provider struct {
+	profileID string
 	cfgPath   string
 	cachePath string
 	http      *http.Client
@@ -49,14 +51,33 @@ type Provider struct {
 	fetchInfo provider.FetchInfo
 }
 
+// NewProvider loads tokens/settings for the active profile (env > config.json > default).
 func NewProvider() (Provider, error) {
-	cfgPath, err := configPath()
+	return newProviderForID(paths.ProfileOrExplicit(""))
+}
+
+// NewProviderForProfile loads a specific profile folder, ignoring AEROBIX_PROFILE.
+// Call paths.SetActiveProfile first if you want the choice persisted.
+func NewProviderForProfile(profileID string) (Provider, error) {
+	return newProviderForID(paths.ProfileOrExplicit(profileID))
+}
+
+func newProviderForID(pid string) (Provider, error) {
+	if err := paths.EnsureProfileDirs(pid); err != nil {
+		return Provider{}, err
+	}
+	cfgPath, err := paths.DataPath(pid)
+	if err != nil {
+		return Provider{}, err
+	}
+	cachePath, err := paths.CachePath(pid)
 	if err != nil {
 		return Provider{}, err
 	}
 	p := Provider{
+		profileID: pid,
 		cfgPath:   cfgPath,
-		cachePath: filepath.Join(filepath.Dir(cfgPath), "activities_cache.json"),
+		cachePath: cachePath,
 		http:      &http.Client{Timeout: 20 * time.Second},
 		cfg: config{
 			AthleteName: "Hacker Athlete",
@@ -67,6 +88,9 @@ func NewProvider() (Provider, error) {
 	_ = p.load()
 	return p, nil
 }
+
+// ProfileID returns the resolved on-disk profile (same as active profile at startup).
+func (p Provider) ProfileID() string { return p.profileID }
 
 func (p Provider) Name() string { return "Strava" }
 
@@ -84,7 +108,7 @@ func (p Provider) Settings() provider.Settings {
 		HRZone2Max:   p.cfg.HRZone2Max,
 		HRZone3Max:   p.cfg.HRZone3Max,
 		HRZone4Max:   p.cfg.HRZone4Max,
-		GarminFITDir: p.cfg.GarminFITDir,
+		GarminFITDir: p.effectiveGarminFITDir(),
 		RunOnly:      p.cfg.RunOnly,
 		ClientID:     p.cfg.ClientID,
 		ClientSecret: p.cfg.ClientSecret,
@@ -106,11 +130,28 @@ func (p *Provider) UpdateSettings(s provider.Settings) error {
 	p.cfg.HRZone2Max = s.HRZone2Max
 	p.cfg.HRZone3Max = s.HRZone3Max
 	p.cfg.HRZone4Max = s.HRZone4Max
-	p.cfg.GarminFITDir = strings.TrimSpace(s.GarminFITDir)
+	defGarmin, _ := paths.GarminDir(p.profileID)
+	g := strings.TrimSpace(s.GarminFITDir)
+	if g == defGarmin {
+		p.cfg.GarminFITDir = ""
+	} else {
+		p.cfg.GarminFITDir = g
+	}
 	p.cfg.RunOnly = s.RunOnly
 	p.cfg.ClientID = strings.TrimSpace(s.ClientID)
 	p.cfg.ClientSecret = strings.TrimSpace(s.ClientSecret)
 	return p.save()
+}
+
+func (p Provider) effectiveGarminFITDir() string {
+	if strings.TrimSpace(p.cfg.GarminFITDir) != "" {
+		return p.cfg.GarminFITDir
+	}
+	g, err := paths.GarminDir(p.profileID)
+	if err != nil {
+		return ""
+	}
+	return g
 }
 
 func (p Provider) AuthURL() (string, error) {
@@ -458,14 +499,6 @@ func (p *Provider) save() error {
 		return err
 	}
 	return os.WriteFile(p.cfgPath, b, 0o600)
-}
-
-func configPath() (string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "aerobix", "strava.json"), nil
 }
 
 type activitiesCache struct {

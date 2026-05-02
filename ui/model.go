@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -11,8 +12,11 @@ import (
 
 	"aerobix/domain"
 	"aerobix/garminfit"
+	"aerobix/paths"
 	"aerobix/physics"
 	"aerobix/provider"
+	"aerobix/provider/mock"
+	"aerobix/provider/strava"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -125,22 +129,29 @@ type Model struct {
 	authCode       string
 	asyncCh        <-chan tea.Msg
 	spinnerFrame   int
+
+	profileIDSetting string
+
+	profilePickerOpen    bool
+	profilePickerCursor  int
+	profilePickerChoices []string
 }
 
 func NewModel(dataProvider provider.DataProvider) Model {
 	settings := dataProvider.Settings()
 	return Model{
-		dataProvider:   dataProvider,
-		settings:       settings,
-		profile:        dataProvider.AthleteProfile(),
-		activityTable:  newActivityTable(nil),
-		garminTable:    newActivityTable(nil),
-		loading:        true,
-		status:         "Press r to reload activities.",
-		settingsCursor: 0,
-		dashProvider:   "strava",
-		preReload:      map[string]physics.PMCPoint{},
-		dashDelta:      map[string]dashboardDelta{},
+		dataProvider:     dataProvider,
+		settings:         settings,
+		profile:          dataProvider.AthleteProfile(),
+		profileIDSetting: paths.ActiveProfile(),
+		activityTable:    newActivityTable(nil),
+		garminTable:      newActivityTable(nil),
+		loading:          true,
+		status:           "Press r to reload activities.",
+		settingsCursor:   0,
+		dashProvider:     "strava",
+		preReload:        map[string]physics.PMCPoint{},
+		dashDelta:        map[string]dashboardDelta{},
 	}
 }
 
@@ -221,6 +232,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		return m, nil
 	case tea.KeyMsg:
+		if m.profilePickerOpen {
+			return m.handleProfilePickerKey(msg)
+		}
 		if m.editMode {
 			return m.handleEditKeys(msg)
 		}
@@ -240,6 +254,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toggleDashboardProvider()
 				return m, nil
 			}
+		case "P":
+			return m.openProfilePicker()
 		case "left", "h":
 			if m.navCursor > 0 {
 				m.navCursor--
@@ -274,7 +290,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activityTable.MoveDown(1)
 				m.activityTable.UpdateViewport()
 			}
-			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 12 {
+			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 13 {
 				m.settingsCursor++
 			}
 			if navItems[m.navCursor] == "Garmin (Beta)" {
@@ -362,6 +378,9 @@ func (m Model) handleEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	if m.profilePickerOpen {
+		return m.renderProfilePickerScreen()
+	}
 	tabs := m.renderTabs()
 	main := m.renderMain()
 	return appStyle.Render(lipgloss.JoinVertical(lipgloss.Left, tabs, "", main))
@@ -376,7 +395,7 @@ func (m Model) renderTabs() string {
 		}
 		rows = append(rows, style.Render(item))
 	}
-	help := mutedStyle.Render("  Keys: h/l nav | j/k move | r Strava reload | g Garmin reload | p dashboard provider | q quit")
+	help := mutedStyle.Render("  Keys: h/l nav | j/k move | P profiles | r Strava | g Garmin | p dash source | q quit")
 	return lipgloss.JoinHorizontal(lipgloss.Top, rows...) + help
 }
 
@@ -427,13 +446,14 @@ func (m Model) renderDashboard() string {
 	}
 	graph := asciigraph.Plot(trend, asciigraph.Height(6), asciigraph.Caption("CTL trend"))
 	readiness := subtleBoxStyle.Render(renderReadinessSummary(last))
+	loadAnalytics := subtleBoxStyle.Render(renderLoadAnalytics(currentPMC))
 	weekly := subtleBoxStyle.Render(renderWeeklySummary(currentSummaries))
 	runPerf := subtleBoxStyle.Render(renderRunPerformanceSummary(currentSummaries))
 	trends := subtleBoxStyle.Render(renderMetricTrends(currentSummaries))
 	deltas := subtleBoxStyle.Render(m.renderDashboardDelta())
 	explain := subtleBoxStyle.Render(renderMeaningLegend(last))
 	selector := subtleBoxStyle.Render(m.renderDashboardProviderSelector())
-	return titleStyle.Render("Dashboard") + "\n\n" + selector + "\n\n" + top + "\n\n" + readiness + "\n\n" + deltas + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
+	return titleStyle.Render("Dashboard") + "\n\n" + selector + "\n\n" + top + "\n\n" + readiness + "\n\n" + deltas + "\n\n" + loadAnalytics + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
 }
 
 func (m Model) renderActivities() string {
@@ -466,6 +486,7 @@ func (m Model) renderSettings() string {
 		fmt.Sprintf("Run activities only: %t", m.settings.RunOnly),
 		fmt.Sprintf("Client ID: %s", maskIfNeeded(m.settings.ClientID, false)),
 		fmt.Sprintf("Client Secret: %s", maskIfNeeded(m.settings.ClientSecret, true)),
+		fmt.Sprintf("Profile ID (P to switch, s saves): %s", m.profileIDSetting),
 		fmt.Sprintf("Auth Code: %s", maskIfNeeded(m.currentAuthCode(), false)),
 	}
 	for i := range fields {
@@ -480,10 +501,11 @@ func (m Model) renderSettings() string {
 		edit = fmt.Sprintf("\n\nEditing: %s", m.inputBuffer)
 	}
 	return fmt.Sprintf(
-		"%s\n\nProvider: %s\nConnected: %t\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- press g anywhere to import Garmin FIT from Garmin FIT dir",
+		"%s\n\nProvider: %s\nConnected: %t%s\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- press g anywhere to import Garmin FIT from Garmin FIT dir",
 		titleStyle.Render("Settings"),
 		m.dataProvider.Name(),
 		m.settings.Connected,
+		profileEnvOverrideNote(),
 		strings.Join(fields, "\n"),
 	) + edit
 }
@@ -566,6 +588,9 @@ func openBrowserCmd(url string) tea.Cmd {
 }
 
 func (m *Model) persistSettings() error {
+	if err := paths.SetActiveProfile(m.profileIDSetting); err != nil {
+		return err
+	}
 	if err := m.dataProvider.UpdateSettings(m.settings); err != nil {
 		return err
 	}
@@ -600,8 +625,12 @@ func (m Model) currentSettingValue() string {
 		return m.settings.ClientID
 	case 11:
 		return m.settings.ClientSecret
-	default:
+	case 12:
+		return m.profileIDSetting
+	case 13:
 		return m.currentAuthCode()
+	default:
+		return ""
 	}
 }
 
@@ -648,6 +677,8 @@ func (m *Model) applyCurrentSetting(v string) {
 	case 11:
 		m.settings.ClientSecret = strings.TrimSpace(v)
 	case 12:
+		m.profileIDSetting = strings.TrimSpace(v)
+	case 13:
 		m.status = "Auth code captured. Press x to exchange."
 		m.setAuthCode(v)
 	}
@@ -1077,6 +1108,26 @@ func renderMeaningLegend(p physics.PMCPoint) string {
 	)
 }
 
+func renderLoadAnalytics(pmc []physics.PMCPoint) string {
+	la := physics.LoadAnalyticsFromPMC(pmc)
+	if !la.HasData {
+		return "Load analytics (7d): insufficient history."
+	}
+	return fmt.Sprintf(
+		"Load analytics (7d)\nMonotony %.2f (high = repetitive daily load) | Strain %.0f | CTL ramp %.2f / day",
+		la.Monotony,
+		la.Strain,
+		la.RampPerDay,
+	)
+}
+
+func profileEnvOverrideNote() string {
+	if v := strings.TrimSpace(os.Getenv("AEROBIX_PROFILE")); v != "" {
+		return "\n" + mutedStyle.Render("Note: AEROBIX_PROFILE overrides profile in config.json on startup.")
+	}
+	return ""
+}
+
 func renderWeeklySummary(summaries []activitySummary) string {
 	if len(summaries) == 0 {
 		return "Last 7 days: no sessions"
@@ -1443,6 +1494,131 @@ func (m Model) renderDashboardDelta() string {
 		fmtSigned(delta.TSB),
 		delta.TSBP,
 	)
+}
+
+func (m Model) openProfilePicker() (tea.Model, tea.Cmd) {
+	ids, err := paths.ListProfiles()
+	if err != nil {
+		m.status = "Could not list profiles: " + err.Error()
+		return m, nil
+	}
+	m.profilePickerChoices = ids
+	m.profilePickerOpen = true
+	m.profilePickerCursor = 0
+	cur := paths.ActiveProfile()
+	for i, id := range ids {
+		if id == cur {
+			m.profilePickerCursor = i
+			break
+		}
+	}
+	return m, nil
+}
+
+func (m Model) handleProfilePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc", "q":
+		m.profilePickerOpen = false
+		return m, nil
+	case "up", "k":
+		if m.profilePickerCursor > 0 {
+			m.profilePickerCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.profilePickerCursor < len(m.profilePickerChoices)-1 {
+			m.profilePickerCursor++
+		}
+		return m, nil
+	case "enter":
+		if len(m.profilePickerChoices) == 0 {
+			m.profilePickerOpen = false
+			return m, nil
+		}
+		id := m.profilePickerChoices[m.profilePickerCursor]
+		return m.switchToProfile(id)
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) switchToProfile(id string) (tea.Model, tea.Cmd) {
+	m.profilePickerOpen = false
+
+	if id == m.profileIDSetting {
+		m.status = fmt.Sprintf("Already using profile %s.", id)
+		return m, nil
+	}
+
+	if err := paths.SetActiveProfile(id); err != nil {
+		m.status = "Profile: " + err.Error()
+		return m, nil
+	}
+	m.profileIDSetting = id
+
+	p, err := strava.NewProviderForProfile(id)
+	if err != nil {
+		m.dataProvider = mock.NewProvider()
+		m.status = "Profile switched; Strava unavailable (" + err.Error() + ") — mock data."
+	} else {
+		m.dataProvider = &p
+		m.status = fmt.Sprintf("Switched to profile %s. Loading…", id)
+	}
+	m.settings = m.dataProvider.Settings()
+	m.profile = m.dataProvider.AthleteProfile()
+	m.fetchInfo = provider.FetchInfo{}
+	m.rawActivities = nil
+	m.rawGarminActs = nil
+	m.activityCursor = 0
+	m.garminCursor = 0
+	m.navCursor = 0
+	m.dashProvider = "strava"
+	m.preReload = map[string]physics.PMCPoint{}
+	m.dashDelta = map[string]dashboardDelta{}
+	m.asyncCh = nil
+	m.loading = true
+	m.applyFilters()
+	return m, tea.Batch(m.loadActivitiesCmd(false), spinnerTickCmd())
+}
+
+func (m Model) renderProfilePickerScreen() string {
+	root := "(unknown)"
+	if d, err := paths.AerobixDir(); err == nil {
+		root = d
+	}
+	title := titleStyle.Render("Switch profile")
+	var lines []string
+	effective := m.profileIDSetting
+	for i, id := range m.profilePickerChoices {
+		label := id
+		if id == effective {
+			label += " · active"
+		}
+		if i == m.profilePickerCursor {
+			lines = append(lines, navItemActiveStyle.Render("  ▸ "+label))
+		} else {
+			lines = append(lines, navItemStyle.Render("    "+label))
+		}
+	}
+	if len(m.profilePickerChoices) == 0 {
+		lines = append(lines, mutedStyle.Render("  (no profile folders)"))
+	}
+	envNote := ""
+	if v := strings.TrimSpace(os.Getenv("AEROBIX_PROFILE")); v != "" {
+		envNote = "\n" + mutedStyle.Render("AEROBIX_PROFILE="+v+" overrides config on next launch when set.")
+	}
+	hint := mutedStyle.Render("↑/↓ select · Enter apply · Esc or q close") + "\n" + mutedStyle.Render("Data: "+root) + envNote
+	boxW := max(40, min(m.width-4, 72))
+	box := cardStyle.Width(boxW).Render(title + "\n\n" + strings.Join(lines, "\n") + "\n\n" + hint)
+	if m.width <= 0 || m.height <= 0 {
+		return appStyle.Render(box)
+	}
+	placed := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceChars(" "),
+	)
+	return appStyle.Render(placed)
 }
 
 func fmtSigned(v float64) string {
