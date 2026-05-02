@@ -307,6 +307,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				return m, m.exchangeCodeCmd()
 			}
+		case "o":
+			if navItems[m.navCursor] == "Settings" {
+				m.settings.RunOnly = !m.settings.RunOnly
+				if err := m.persistSettings(); err != nil {
+					m.status = "Toggle failed: " + err.Error()
+				} else {
+					m.status = fmt.Sprintf("Run activities only: %t", m.settings.RunOnly)
+				}
+			}
 		}
 	case asyncChannelReadyMsg:
 		m.asyncCh = msg.ch
@@ -471,7 +480,7 @@ func (m Model) renderSettings() string {
 		edit = fmt.Sprintf("\n\nEditing: %s", m.inputBuffer)
 	}
 	return fmt.Sprintf(
-		"%s\n\nProvider: %s\nConnected: %t\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- press g anywhere to import Garmin FIT from Garmin FIT dir",
+		"%s\n\nProvider: %s\nConnected: %t\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- press g anywhere to import Garmin FIT from Garmin FIT dir",
 		titleStyle.Render("Settings"),
 		m.dataProvider.Name(),
 		m.settings.Connected,
