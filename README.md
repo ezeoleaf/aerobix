@@ -139,7 +139,11 @@ Data lives under an OS-specific config directory as **`…/aerobix/`** (JSON on 
   - `cache.json` — cached Strava activities
   - `garmin/` — default folder for FIT import when “Garmin FIT dir” is left at the default
 
+Each profile has its own `data.json`, so **OAuth tokens (and thus the linked Strava athlete) are per profile**. You can reuse the same Strava API app (Client ID/Secret) for every profile; run **OAuth (`a` / `x`) again** after switching to a profile when you want that profile to use a different Strava account.
+
 Optional Coros/Polar (future) can mirror Garmin as extra subfolders under the same profile, e.g. `profiles/alice/coros/`.
+
+**New profile:** on **Settings**, press **`n`**, type an id, **Enter** — Aerobix creates `profiles/<id>/` and switches to it (no manual folder needed).
 
 **Switch profile:** press **`P`** and choose a folder under `profiles/`, or edit **Profile ID** in Settings and Save (`s`).  
 Override for one launch: `AEROBIX_PROFILE=alice go run .` (overrides `config.json` until unset).
@@ -163,7 +167,7 @@ Existing installs: first run **migrates** old `strava.json` + `activities_cache.
 7. Paste code into `Auth Code` field.
 8. Press `x` to exchange code and load activities.
 
-Strava config/tokens are stored per profile at `…/aerobix/profiles/<id>/data.json` (see paths above).
+Strava config/tokens are stored per profile at `…/aerobix/profiles/<id>/data.json` (see paths above). Repeat the Strava setup steps for each profile that should pull a different athlete’s data.
 
 ## Keybindings
 
@@ -177,6 +181,7 @@ Strava config/tokens are stored per profile at `…/aerobix/profiles/<id>/data.j
 - Activities:
   - `j`/`k` or down/up arrows: move selection
 - Settings:
+  - `n` create a new profile (prompt), then loads it
   - `e` edit selected field
   - `o` toggle Run activities only
   - `s` save settings

@@ -135,6 +135,8 @@ type Model struct {
 	profilePickerOpen    bool
 	profilePickerCursor  int
 	profilePickerChoices []string
+
+	createProfileOpen bool
 }
 
 func NewModel(dataProvider provider.DataProvider) Model {
@@ -235,6 +237,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.profilePickerOpen {
 			return m.handleProfilePickerKey(msg)
 		}
+		if m.createProfileOpen {
+			return m.handleCreateProfileKeys(msg)
+		}
 		if m.editMode {
 			return m.handleEditKeys(msg)
 		}
@@ -332,6 +337,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = fmt.Sprintf("Run activities only: %t", m.settings.RunOnly)
 				}
 			}
+		case "n":
+			if navItems[m.navCursor] == "Settings" {
+				m.createProfileOpen = true
+				m.inputBuffer = ""
+				m.status = "New profile: type id (a-z, 0-9, -, _), Enter create, Esc cancel."
+			}
 		}
 	case asyncChannelReadyMsg:
 		m.asyncCh = msg.ch
@@ -349,6 +360,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, waitForAsyncMsg(m.asyncCh)
 		}
 		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleCreateProfileKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.createProfileOpen = false
+		m.inputBuffer = ""
+		m.status = "New profile cancelled."
+		return m, nil
+	case "enter":
+		raw := strings.TrimSpace(m.inputBuffer)
+		m.createProfileOpen = false
+		m.inputBuffer = ""
+		if raw == "" {
+			m.status = "New profile: empty name."
+			return m, nil
+		}
+		id, err := paths.CreateProfile(raw)
+		if err != nil {
+			m.status = "New profile: " + err.Error()
+			return m, nil
+		}
+		return m.switchToProfile(id)
+	case "backspace":
+		if len(m.inputBuffer) > 0 {
+			m.inputBuffer = m.inputBuffer[:len(m.inputBuffer)-1]
+		}
+		return m, nil
+	default:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			m.inputBuffer += string(msg.Runes)
+		}
 	}
 	return m, nil
 }
@@ -497,11 +544,18 @@ func (m Model) renderSettings() string {
 		}
 	}
 	edit := ""
-	if m.editMode {
+	if m.createProfileOpen {
+		edit = fmt.Sprintf(
+			"\n\n%s\n%s\n\n%s",
+			titleStyle.Render("New profile id"),
+			m.inputBuffer,
+			mutedStyle.Render("Enter create · Esc cancel (name is sanitized to letters, digits, -, _)"),
+		)
+	} else if m.editMode {
 		edit = fmt.Sprintf("\n\nEditing: %s", m.inputBuffer)
 	}
 	return fmt.Sprintf(
-		"%s\n\nProvider: %s\nConnected: %t%s\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- press g anywhere to import Garmin FIT from Garmin FIT dir",
+		"%s\n\nProvider: %s\nConnected: %t%s\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- n create new profile folder & switch\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- press g anywhere to import Garmin FIT from Garmin FIT dir",
 		titleStyle.Render("Settings"),
 		m.dataProvider.Name(),
 		m.settings.Connected,

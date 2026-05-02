@@ -16,6 +16,7 @@ package paths
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	pathpkg "path/filepath"
@@ -278,4 +279,26 @@ func EnsureProfileDirs(profileID string) error {
 		return err
 	}
 	return os.MkdirAll(dir, 0o755)
+}
+
+// CreateProfile creates profiles/<id>/ with an empty garmin/ subfolder.
+// The id is sanitized the same way as elsewhere; returns an error if the folder already exists.
+func CreateProfile(raw string) (string, error) {
+	id := sanitizeProfileID(raw)
+	if id == "" {
+		return "", errors.New("profile id is empty (use letters, digits, - or _)")
+	}
+	dir, err := ProfileDir(id)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(dir); err == nil {
+		return "", fmt.Errorf("profile %q already exists", id)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	if err := EnsureProfileDirs(id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
