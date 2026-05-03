@@ -18,7 +18,19 @@ func main() {
 	}
 	dataProvider := buildProvider()
 
-	program := tea.NewProgram(ui.NewModel(dataProvider), tea.WithAltScreen())
+	fitCh := make(chan tea.Msg, 64)
+	program := tea.NewProgram(
+		ui.NewModel(dataProvider, fitCh),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	)
+
+	go func() {
+		for msg := range fitCh {
+			program.Send(msg)
+		}
+	}()
+
 	if _, err := program.Run(); err != nil {
 		log.Fatal(err)
 	}

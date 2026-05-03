@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	pathpkg "path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,9 +19,12 @@ import (
 	"aerobix/provider/mock"
 	"aerobix/provider/strava"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/guptarohit/asciigraph"
 )
 
@@ -82,6 +86,12 @@ type activitySummary struct {
 	Zones           [5]float64
 	ZoneBasis       string
 	HRZones         [5]float64
+
+	GapPaceText       string
+	UphillTimePct     float64
+	DownhillBrakeLoad float64
+	RSSPoints         float64
+	RSSSource         string
 }
 
 type dashboardDelta struct {
@@ -95,6 +105,14 @@ type dashboardDelta struct {
 }
 
 var navItems = []string{"Dashboard", "Activities", "Garmin (Beta)", "Settings"}
+
+// chromeAppPad* match appStyle padding so the scroll viewport fills the usable area.
+const (
+	chromeAppPadV       = 2
+	chromeAppPadH       = 4
+	chromeHeaderReserve = 2 // tab row + bottom border
+	chromeFooterReserve = 3 // two text lines + top border
+)
 
 type Model struct {
 	width          int
@@ -137,11 +155,21 @@ type Model struct {
 	profilePickerChoices []string
 
 	createProfileOpen bool
+
+	fitNotifyChan          chan<- tea.Msg
+	fitWatcherCtl          *fitWatcherCtl
+	pendingGarminFITRescan bool
+
+	mainViewport viewport.Model
 }
 
-func NewModel(dataProvider provider.DataProvider) Model {
+func NewModel(dataProvider provider.DataProvider, fitNotify chan<- tea.Msg) Model {
 	settings := dataProvider.Settings()
-	return Model{
+	ctl := newFitWatcherCtl()
+	if fitNotify != nil {
+		ctl.Restart(settings.GarminFITDir, fitNotify)
+	}
+	m := Model{
 		dataProvider:     dataProvider,
 		settings:         settings,
 		profile:          dataProvider.AthleteProfile(),
@@ -154,7 +182,44 @@ func NewModel(dataProvider provider.DataProvider) Model {
 		dashProvider:     "strava",
 		preReload:        map[string]physics.PMCPoint{},
 		dashDelta:        map[string]dashboardDelta{},
+		fitNotifyChan:    fitNotify,
+		fitWatcherCtl:    ctl,
+		mainViewport:     newMainViewport(),
 	}
+	return m.applyWindowLayout(80, 24)
+}
+
+func newMainViewport() viewport.Model {
+	vp := viewport.New(0, 0)
+	vp.KeyMap = viewport.KeyMap{
+		PageDown: key.NewBinding(
+			key.WithKeys("pgdown"),
+			key.WithHelp("pgdn", "page down"),
+		),
+		PageUp: key.NewBinding(
+			key.WithKeys("pgup"),
+			key.WithHelp("pgup", "page up"),
+		),
+		HalfPageDown: key.NewBinding(
+			key.WithKeys("ctrl+d"),
+			key.WithHelp("ctrl+d", "½ page down"),
+		),
+		HalfPageUp: key.NewBinding(
+			key.WithKeys("ctrl+u"),
+			key.WithHelp("ctrl+u", "½ page up"),
+		),
+		Down:  key.NewBinding(),
+		Up:    key.NewBinding(),
+		Left:  key.NewBinding(),
+		Right: key.NewBinding(),
+	}
+	vp.MouseWheelEnabled = true
+	vp.MouseWheelDelta = 3
+	vp.Style = lipgloss.NewStyle().
+		Padding(0, 1).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240"))
+	return vp
 }
 
 func (m Model) Init() tea.Cmd {
@@ -162,33 +227,52 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.dispatchUpdate(msg)
+	mm := next.(Model)
+	if !mm.profilePickerOpen && !mm.createProfileOpen && !mm.editMode {
+		mm.mainViewport.SetContent(mm.renderScrollableMainBody())
+	}
+	return mm, cmd
+}
+
+func (m Model) dispatchUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.activityTable.SetWidth(max(msg.Width-10, 70))
-		m.activityTable.SetHeight(max(msg.Height-24, 6))
-		m.garminTable.SetWidth(max(msg.Width-10, 70))
-		m.garminTable.SetHeight(max(msg.Height-24, 6))
+		m = m.applyWindowLayout(msg.Width, msg.Height)
 		return m, nil
+	case tea.MouseMsg:
+		if m.profilePickerOpen || m.createProfileOpen || m.editMode {
+			return m, nil
+		}
+		m.mainViewport.SetContent(m.renderScrollableMainBody())
+		var vpCmd tea.Cmd
+		m.mainViewport, vpCmd = m.mainViewport.Update(msg)
+		return m, vpCmd
 	case activitiesLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
 			m.status = "Load failed: " + msg.err.Error()
-			return m, nil
+		} else {
+			m.rawActivities = msg.activities
+			m.applyFilters()
+			m.updateDashboardDelta("strava")
+			m.status = fmt.Sprintf("Loaded %d activities from %s.", len(m.activities), m.dataProvider.Name())
+			if msg.fetchInfo.Source != "" {
+				m.fetchInfo = msg.fetchInfo
+				m.status = fmt.Sprintf(
+					"Loaded %d activities (%s at %s).",
+					len(m.activities),
+					msg.fetchInfo.Source,
+					formatFetchTime(msg.fetchInfo.FetchedAt),
+				)
+			}
 		}
-		m.rawActivities = msg.activities
-		m.applyFilters()
-		m.updateDashboardDelta("strava")
-		m.status = fmt.Sprintf("Loaded %d activities from %s.", len(m.activities), m.dataProvider.Name())
-		if msg.fetchInfo.Source != "" {
-			m.fetchInfo = msg.fetchInfo
-			m.status = fmt.Sprintf(
-				"Loaded %d activities (%s at %s).",
-				len(m.activities),
-				msg.fetchInfo.Source,
-				formatFetchTime(msg.fetchInfo.FetchedAt),
-			)
+		if m.pendingGarminFITRescan && m.asyncCh == nil {
+			m.pendingGarminFITRescan = false
+			m.captureReloadBaseline("garmin")
+			m.loading = true
+			m.status = "FIT folder queued during Strava reload — importing Garmin…"
+			return m, tea.Batch(m.startGarminImportCmd(), spinnerTickCmd())
 		}
 		return m, nil
 	case spinnerTickMsg:
@@ -214,10 +298,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "Connected to Strava. Reloading activities..."
 		m.loading = true
 		return m, tea.Batch(m.loadActivitiesCmd(true), spinnerTickCmd())
+	case garminFITWatchTriggerMsg:
+		if len(msg.Paths) == 0 {
+			return m, nil
+		}
+		short := pathpkg.Base(msg.Paths[0])
+		if len(msg.Paths) > 1 {
+			short += fmt.Sprintf(" +%d more", len(msg.Paths)-1)
+		}
+		TryDesktopNotify("Aerobix", "New Garmin FIT file — importing: "+short)
+		m.status = fmt.Sprintf("FIT folder: new file %s — importing Garmin…", short)
+		if m.asyncCh != nil || m.loading {
+			m.pendingGarminFITRescan = true
+			return m, nil
+		}
+		m.captureReloadBaseline("garmin")
+		m.loading = true
+		return m, tea.Batch(m.startGarminImportCmd(), spinnerTickCmd())
 	case garminLoadedMsg:
 		m.loading = false
 		m.asyncCh = nil
 		if msg.err != nil {
+			m.pendingGarminFITRescan = false
 			m.status = "Garmin load failed: " + msg.err.Error()
 			return m, nil
 		}
@@ -232,6 +334,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.result.Deduped,
 			len(m.garminActs),
 		)
+		if m.pendingGarminFITRescan {
+			m.pendingGarminFITRescan = false
+			m.captureReloadBaseline("garmin")
+			m.loading = true
+			m.status = "FIT folder changed again during import — refreshing Garmin…"
+			return m, tea.Batch(m.startGarminImportCmd(), spinnerTickCmd())
+		}
 		return m, nil
 	case tea.KeyMsg:
 		if m.profilePickerOpen {
@@ -243,6 +352,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.editMode {
 			return m.handleEditKeys(msg)
 		}
+		m.mainViewport.SetContent(m.renderScrollableMainBody())
+		m.mainViewport, _ = m.mainViewport.Update(msg)
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -264,10 +375,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "left", "h":
 			if m.navCursor > 0 {
 				m.navCursor--
+				m.mainViewport.GotoTop()
 			}
 		case "right", "l":
 			if m.navCursor < len(navItems)-1 {
 				m.navCursor++
+				m.mainViewport.GotoTop()
 			}
 		case "up", "k":
 			if navItems[m.navCursor] == "Activities" {
@@ -428,12 +541,37 @@ func (m Model) View() string {
 	if m.profilePickerOpen {
 		return m.renderProfilePickerScreen()
 	}
-	tabs := m.renderTabs()
-	main := m.renderMain()
-	return appStyle.Render(lipgloss.JoinVertical(lipgloss.Left, tabs, "", main))
+	header := m.renderHeaderTabs()
+	body := m.mainViewport.View()
+	footer := m.renderFooter()
+	stack := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return appStyle.Render(stack)
 }
 
-func (m Model) renderTabs() string {
+func (m Model) applyWindowLayout(w, h int) Model {
+	if w <= 0 {
+		w = 80
+	}
+	if h <= 0 {
+		h = 24
+	}
+	m.width = w
+	m.height = h
+	contentW := max(40, w-chromeAppPadH)
+	innerH := max(8, h-chromeAppPadV)
+	vpH := max(6, innerH-chromeHeaderReserve-chromeFooterReserve)
+	m.mainViewport.Width = contentW
+	m.mainViewport.Height = vpH
+	tw := max(contentW-6, 40)
+	th := max(6, min(16, vpH/3))
+	m.activityTable.SetWidth(tw)
+	m.activityTable.SetHeight(th)
+	m.garminTable.SetWidth(tw)
+	m.garminTable.SetHeight(th)
+	return m
+}
+
+func (m Model) renderHeaderTabs() string {
 	var rows []string
 	for i, item := range navItems {
 		style := tabStyle
@@ -442,11 +580,24 @@ func (m Model) renderTabs() string {
 		}
 		rows = append(rows, style.Render(item))
 	}
-	help := mutedStyle.Render("  Keys: h/l nav | j/k move | P profiles | r Strava | g Garmin | p dash source | q quit")
-	return lipgloss.JoinHorizontal(lipgloss.Top, rows...) + help
+	bar := lipgloss.JoinHorizontal(lipgloss.Top, rows...)
+	w := max(20, m.width-chromeAppPadH)
+	return headerBarStyle.Width(w).Render(bar)
 }
 
-func (m Model) renderMain() string {
+func (m Model) renderFooter() string {
+	w := max(20, m.width-chromeAppPadH)
+	keys := "h/l tabs · j/k lists · P profiles · r Strava · g Garmin · p dash · PgUp/PgDn scroll · Ctrl+u/d · wheel · q quit"
+	line1 := ansi.Truncate(keys, w, "…")
+	st := strings.TrimSpace(m.status)
+	if st == "" {
+		st = " "
+	}
+	line2 := ansi.Truncate(st, w, "…")
+	return footerStyle.Width(w).Render(mutedStyle.Render(line1) + "\n" + mutedStyle.Render(line2))
+}
+
+func (m Model) renderScrollableMainBody() string {
 	content := ""
 	switch navItems[m.navCursor] {
 	case "Dashboard":
@@ -462,8 +613,7 @@ func (m Model) renderMain() string {
 	if m.loading {
 		loading = "\n\n" + spinnerFrames[m.spinnerFrame] + " Loading..."
 	}
-	status := mutedStyle.Render("\n\n" + m.status)
-	return panelStyle.Width(max(m.width-6, 78)).Render(content + loading + status)
+	return content + loading
 }
 
 var spinnerFrames = []string{"|", "/", "-", "\\"}
@@ -493,7 +643,7 @@ func (m Model) renderDashboard() string {
 	}
 	graph := asciigraph.Plot(trend, asciigraph.Height(6), asciigraph.Caption("CTL trend"))
 	readiness := subtleBoxStyle.Render(renderReadinessSummary(last))
-	loadAnalytics := subtleBoxStyle.Render(renderLoadAnalytics(currentPMC))
+	loadAnalytics := subtleBoxStyle.Render(renderLoadAnalytics(currentPMC, currentSummaries))
 	weekly := subtleBoxStyle.Render(renderWeeklySummary(currentSummaries))
 	runPerf := subtleBoxStyle.Render(renderRunPerformanceSummary(currentSummaries))
 	trends := subtleBoxStyle.Render(renderMetricTrends(currentSummaries))
@@ -555,7 +705,7 @@ func (m Model) renderSettings() string {
 		edit = fmt.Sprintf("\n\nEditing: %s", m.inputBuffer)
 	}
 	return fmt.Sprintf(
-		"%s\n\nProvider: %s\nConnected: %t%s\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- n create new profile folder & switch\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- press g anywhere to import Garmin FIT from Garmin FIT dir",
+		"%s\n\nProvider: %s\nConnected: %t%s\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- n create new profile folder & switch\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- g imports Garmin FIT; dropping .fit files into Garmin FIT dir also auto-imports (debounced) with a desktop notify when OS supports it",
 		titleStyle.Render("Settings"),
 		m.dataProvider.Name(),
 		m.settings.Connected,
@@ -589,11 +739,21 @@ func (m Model) renderDetails(s activitySummary) string {
 			renderRunningEconomy(s) + "\n" + renderDurabilityBlock(s),
 		)
 		detailGrid = lipgloss.JoinVertical(lipgloss.Left, detailGrid, "\n"+economyCard)
+		if block := renderTerrainLoadBlock(s); block != "" {
+			terrainCard := cardStyle.Width(max(44, (m.width - 38))).Render(block)
+			detailGrid = lipgloss.JoinVertical(lipgloss.Left, detailGrid, "\n"+terrainCard)
+		}
 	}
 
+	loadBits := fmt.Sprintf("NP %.0f | IF %.2f | TSS %.1f (%s)", s.NP, s.IF, s.TSS, s.TSSSource)
+	if s.RSSPoints > 0 {
+		loadBits += fmt.Sprintf(" | RSS %.0f (%s)", s.RSSPoints, s.RSSSource)
+	}
+	loadBits += fmt.Sprintf(" | TRIMP %.1f | EF(speed/HR) %.4f", s.TRIMP, s.EFSpeed)
+
 	return fmt.Sprintf(
-		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\nNP %.0f | IF %.2f | TSS %.1f (%s) | TRIMP %.1f | EF(speed/HR) %.4f\nDecoupling %.2f%%\nSession type: %s (%s)\nSession verdict: %s\n%s\n\n%s",
-		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, s.NP, s.IF, s.TSS, s.TSSSource, s.TRIMP, s.EFSpeed, s.Decoupling, s.SessionClass, renderSessionConfidence(s.SessionConf), verdict, s.RunExplanation, detailGrid,
+		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\n%s\nDecoupling %.2f%%\nSession type: %s (%s)\nSession verdict: %s\n%s\n\n%s",
+		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, loadBits, s.Decoupling, s.SessionClass, renderSessionConfidence(s.SessionConf), verdict, s.RunExplanation, detailGrid,
 	)
 }
 
@@ -650,7 +810,15 @@ func (m *Model) persistSettings() error {
 	}
 	m.profile = m.dataProvider.AthleteProfile()
 	m.applyFilters()
+	m.reloadFITWatcher()
 	return nil
+}
+
+func (m *Model) reloadFITWatcher() {
+	if m.fitWatcherCtl == nil || m.fitNotifyChan == nil {
+		return
+	}
+	m.fitWatcherCtl.Restart(m.settings.GarminFITDir, m.fitNotifyChan)
 }
 
 func (m Model) currentSettingValue() string {
@@ -834,34 +1002,56 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 		sessionClass := physics.ClassifySession(a, hrZones)
 		sessionConf := physics.SessionClassificationConfidence(a, hrZones, sessionClass)
 		runExplanation := physics.ExplainRun(sessionClass, durability, formBreakdown, cadenceDropPct)
+		gapText := ""
+		uphillPct := 0.0
+		brakeLoad := 0.0
+		rssPts := 0.0
+		rssSrc := ""
+		if isRunSport(a.Sport) {
+			if g := physics.GradeAdjustedAvgPaceMinKm(a); !math.IsNaN(g) && g > 0 && g < 45 {
+				gapText = formatPaceFromMinPerKm(g)
+			}
+			uphillPct = physics.UphillTimeFraction(a, 2.0) * 100
+			brakeLoad = physics.DownhillBrakingLoad(a)
+			if settings.FTP > 1 && hasUsablePower(a.Power) {
+				rawRSS := physics.RunningSquaredPowerLoad(a.Power, a.TimeSec, settings.FTP)
+				rssPts = sanitizeRSS(rawRSS / 36.0)
+				rssSrc = "run-power/FTP-ref"
+			}
+		}
 		out = append(out, activitySummary{
-			Activity:        a,
-			NP:              np,
-			IF:              ifVal,
-			TSS:             tss,
-			TSSSource:       tssSource,
-			TRIMP:           trimp,
-			EFSpeed:         efSpeed,
-			Decoupling:      decoupling,
-			AvgHR:           avgHR,
-			AvgCadence:      a.AvgCadence,
-			VertOscCM:       a.AvgVerticalOscillationCM,
-			VertRatio:       vertRatio,
-			DecoupleAtMin:   durability.DecouplingStartMinutes,
-			DurabilityScore: durability.Score,
-			HRStabilityPct:  durability.HRStabilityPct,
-			CadenceStdDev:   cadenceStdDev,
-			CadenceDropPct:  cadenceDropPct,
-			FormBreakdown:   formBreakdown.Detected,
-			FormBreakdownAt: formBreakdown.StartMin,
-			SessionClass:    sessionClass,
-			SessionConf:     sessionConf,
-			RunExplanation:  runExplanation,
-			AvgPace:         formatPace(a.Sport, a.DistanceKM, a.Duration),
-			Duration:        formatDurationCompact(a.Duration),
-			Zones:           zones,
-			ZoneBasis:       basis,
-			HRZones:         hrZones,
+			Activity:          a,
+			NP:                np,
+			IF:                ifVal,
+			TSS:               tss,
+			TSSSource:         tssSource,
+			TRIMP:             trimp,
+			EFSpeed:           efSpeed,
+			Decoupling:        decoupling,
+			AvgHR:             avgHR,
+			AvgCadence:        a.AvgCadence,
+			VertOscCM:         a.AvgVerticalOscillationCM,
+			VertRatio:         vertRatio,
+			DecoupleAtMin:     durability.DecouplingStartMinutes,
+			DurabilityScore:   durability.Score,
+			HRStabilityPct:    durability.HRStabilityPct,
+			CadenceStdDev:     cadenceStdDev,
+			CadenceDropPct:    cadenceDropPct,
+			FormBreakdown:     formBreakdown.Detected,
+			FormBreakdownAt:   formBreakdown.StartMin,
+			SessionClass:      sessionClass,
+			SessionConf:       sessionConf,
+			RunExplanation:    runExplanation,
+			AvgPace:           formatPace(a.Sport, a.DistanceKM, a.Duration),
+			Duration:          formatDurationCompact(a.Duration),
+			Zones:             zones,
+			ZoneBasis:         basis,
+			HRZones:           hrZones,
+			GapPaceText:       gapText,
+			UphillTimePct:     uphillPct,
+			DownhillBrakeLoad: brakeLoad,
+			RSSPoints:         rssPts,
+			RSSSource:         rssSrc,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Activity.StartTime.After(out[j].Activity.StartTime) })
@@ -879,6 +1069,27 @@ func sanitizeTSS(v float64) float64 {
 		return maxReasonableSessionTSS
 	}
 	return v
+}
+
+func sanitizeRSS(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0
+	}
+	const maxReasonableRSS = 500.0
+	if v > maxReasonableRSS {
+		return maxReasonableRSS
+	}
+	return v
+}
+
+func formatPaceFromMinPerKm(minPerKm float64) string {
+	if math.IsNaN(minPerKm) || minPerKm <= 0 || minPerKm > 45 {
+		return ""
+	}
+	totalSec := int(minPerKm*60.0 + 0.5)
+	m := totalSec / 60
+	s := totalSec % 60
+	return fmt.Sprintf("%d:%02d/km", m, s)
 }
 
 func buildPMC(summaries []activitySummary) []physics.PMCPoint {
@@ -1095,7 +1306,7 @@ func sessionVerdict(s activitySummary) string {
 }
 
 func renderRunningEconomy(s activitySummary) string {
-	return fmt.Sprintf(
+	txt := fmt.Sprintf(
 		"Running Economy\nAverage Cadence: %s spm\nCadence consistency (sd): %s spm\nCadence drop late run: %s\nVertical Oscillation: %s cm\nVertical Ratio: %s",
 		formatMetricValue(s.AvgCadence, "%.1f"),
 		formatMetricValue(s.CadenceStdDev, "%.2f"),
@@ -1103,6 +1314,34 @@ func renderRunningEconomy(s activitySummary) string {
 		formatMetricValue(s.VertOscCM, "%.1f"),
 		formatVerticalRatioValue(s.VertRatio),
 	)
+	if s.Activity.AvgStanceTimeMs > 0 {
+		txt += fmt.Sprintf("\nAvg stance (GCT proxy): %.0f ms", s.Activity.AvgStanceTimeMs)
+	}
+	if s.Activity.StrideAsymmetryPct > 0 {
+		txt += fmt.Sprintf("\nStride asymmetry: %.1f%%", s.Activity.StrideAsymmetryPct)
+	}
+	return txt
+}
+
+func renderTerrainLoadBlock(s activitySummary) string {
+	if s.GapPaceText == "" && s.UphillTimePct < 0.5 && s.DownhillBrakeLoad < 0.01 && s.RSSPoints <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Terrain & running stress\n")
+	if s.GapPaceText != "" {
+		fmt.Fprintf(&b, "Grade-adjusted pace (modeled): %s\n", s.GapPaceText)
+	}
+	if s.UphillTimePct >= 0.5 {
+		fmt.Fprintf(&b, "Uphill moving time (grade ≥ 2%%): %.0f%%\n", s.UphillTimePct)
+	}
+	if s.DownhillBrakeLoad >= 0.01 {
+		fmt.Fprintf(&b, "Descent braking proxy (trend units): %.1f\n", s.DownhillBrakeLoad)
+	}
+	if s.RSSPoints > 0 {
+		fmt.Fprintf(&b, "RSS (∫ power² vs FTP-ref, TSS analog): %.0f (%s)", s.RSSPoints, s.RSSSource)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func renderDurabilityBlock(s activitySummary) string {
@@ -1157,21 +1396,41 @@ func renderMeaningLegend(p physics.PMCPoint) string {
 		load = "building/base"
 	}
 	return fmt.Sprintf(
-		"How to read this:\n- Fitness (CTL): your long-term training load (%s)\n- Fatigue (ATL): your short-term load (last ~7 days)\n- Form (TSB): freshness = CTL - ATL (higher = fresher)\n- IF: workout intensity vs FTP (1.00 = FTP effort)\n- TSS: training load score (100 ~= 1 hour at FTP)\n- TRIMP: HR-zone weighted impulse (internal load)\n- EF(speed/HR): aerobic efficiency trend; higher over time is usually better\n- Decoupling: aerobic durability drift; <5%% is usually strong steady-state",
+		"How to read this:\n- Fitness (CTL): your long-term training load (%s)\n- Fatigue (ATL): your short-term load (last ~7 days)\n- Form (TSB): freshness = CTL - ATL (higher = fresher)\n- ATL/CTL: acute-vs-chronic ratio from the PMC tail (watch for sudden spikes)\n- WSI: weekly stress index (weekly TSS variability composite)\n- IF: workout intensity vs FTP (1.00 = FTP effort)\n- TSS / RSS: classic load vs squared running-power impulse (FTP-ref scale; see runs with power)\n- TRIMP: HR-zone weighted impulse (internal load)\n- EF(speed/HR): aerobic efficiency trend; higher over time is usually better\n- Decoupling: aerobic durability drift; <5%% is usually strong steady-state",
 		load,
 	)
 }
 
-func renderLoadAnalytics(pmc []physics.PMCPoint) string {
+func sumRSSLast7Days(summaries []activitySummary) float64 {
+	cutoff := time.Now().AddDate(0, 0, -7)
+	var sum float64
+	for _, s := range summaries {
+		if s.Activity.StartTime.Before(cutoff) {
+			continue
+		}
+		sum += s.RSSPoints
+	}
+	return sum
+}
+
+func renderLoadAnalytics(pmc []physics.PMCPoint, summaries []activitySummary) string {
 	la := physics.LoadAnalyticsFromPMC(pmc)
 	if !la.HasData {
 		return "Load analytics (7d): insufficient history."
 	}
+	rss7 := sumRSSLast7Days(summaries)
+	rssPart := ""
+	if rss7 > 0 {
+		rssPart = fmt.Sprintf(" | ΣRSS(7d) %.0f", rss7)
+	}
 	return fmt.Sprintf(
-		"Load analytics (7d)\nMonotony %.2f (high = repetitive daily load) | Strain %.0f | CTL ramp %.2f / day",
+		"Load analytics (7d)\nMonotony %.2f (repetitive load) | Strain %.0f | CTL ramp %.2f / day | WSI %.0f | ATL/CTL %.2f%s",
 		la.Monotony,
 		la.Strain,
 		la.RampPerDay,
+		la.WeeklyStressIndex,
+		la.ATLCTL,
+		rssPart,
 	)
 }
 
@@ -1189,6 +1448,7 @@ func renderWeeklySummary(summaries []activitySummary) string {
 	cutoff := time.Now().AddDate(0, 0, -7)
 	sessions := 0
 	totalTSS := 0.0
+	rss7 := 0.0
 	longest := 0 * time.Minute
 	longestName := "-"
 	for _, s := range summaries {
@@ -1197,6 +1457,7 @@ func renderWeeklySummary(summaries []activitySummary) string {
 		}
 		sessions++
 		totalTSS += s.TSS
+		rss7 += s.RSSPoints
 		if s.Activity.Duration > longest {
 			longest = s.Activity.Duration
 			longestName = s.Activity.Name
@@ -1205,10 +1466,14 @@ func renderWeeklySummary(summaries []activitySummary) string {
 	if sessions == 0 {
 		return "Last 7 days: no sessions"
 	}
-	return fmt.Sprintf(
+	out := fmt.Sprintf(
 		"Last 7 days: %d sessions | Total TSS %.1f | Avg TSS %.1f\nLongest session: %s (%s)",
 		sessions, totalTSS, totalTSS/float64(sessions), longestName, formatDurationCompact(longest),
 	)
+	if rss7 > 0 {
+		out += fmt.Sprintf("\nΣ RSS (runs with power, 7d): %.0f pts", rss7)
+	}
+	return out
 }
 
 func renderRunPerformanceSummary(summaries []activitySummary) string {
@@ -1634,6 +1899,7 @@ func (m Model) switchToProfile(id string) (tea.Model, tea.Cmd) {
 	m.asyncCh = nil
 	m.loading = true
 	m.applyFilters()
+	(&m).reloadFITWatcher()
 	return m, tea.Batch(m.loadActivitiesCmd(false), spinnerTickCmd())
 }
 

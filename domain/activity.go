@@ -16,10 +16,19 @@ type Activity struct {
 	TimeSec   []int
 	SpeedMS   []float64
 	Cadence   []float64
+	// AltitudeM aligns with records when sourced from barometric altitude (Garmin FIT, meters).
+	AltitudeM []float64
+	// VerticalSpeedMS is vertical velocity from FIT when present (m/s, descending negative).
+	VerticalSpeedMS []float64
 
 	AvgCadence               float64
 	AvgVerticalOscillationCM float64
 	AvgStrideLengthM         float64
+
+	// Ground contact mechanics when present on running watches (milliseconds, FIT stance_time).
+	AvgStanceTimeMs float64
+	// StrideAsymmetryPct is |right% - 50| from stride balance telemetry (0 = even split).
+	StrideAsymmetryPct float64
 }
 
 type AthleteProfile struct {

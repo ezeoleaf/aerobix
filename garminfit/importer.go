@@ -190,12 +190,20 @@ func parseFITFile(path string) (domain.Activity, error) {
 	timeSec := make([]int, 0, len(activity.Records))
 	speed := make([]float64, 0, len(activity.Records))
 	cadence := make([]float64, 0, len(activity.Records))
+	altitude := make([]float64, 0, len(activity.Records))
+	verticalSpeed := make([]float64, 0, len(activity.Records))
 	cadenceSamples := make([]float64, 0, len(activity.Records))
 	voSamplesCM := make([]float64, 0, len(activity.Records))
 	strideSamplesM := make([]float64, 0, len(activity.Records))
+	var stanceVals []float64
+	var lateralVals []float64
 
 	var firstTS time.Time
-	for i, r := range activity.Records {
+	for i, rr := range activity.Records {
+		if rr == nil {
+			continue
+		}
+		r := rr
 		if i == 0 {
 			firstTS = r.Timestamp
 		}
@@ -206,7 +214,22 @@ func parseFITFile(path string) (domain.Activity, error) {
 		power = append(power, sanitizeUint16Power(r.Power))
 		hr = append(hr, sanitizeUint8HR(r.HeartRate))
 		timeSec = append(timeSec, delta)
-		speed = append(speed, sanitizeUint32Speed(r.EnhancedSpeed))
+		sp := sanitizeUint32Speed(r.EnhancedSpeed)
+		speed = append(speed, sp)
+
+		altVal := float64(0)
+		al := r.GetEnhancedAltitudeScaled()
+		if !math.IsNaN(al) {
+			altVal = al
+		}
+		altitude = append(altitude, altVal)
+
+		vsVal := float64(0)
+		vv := r.GetVerticalSpeedScaled()
+		if !math.IsNaN(vv) {
+			vsVal = vv
+		}
+		verticalSpeed = append(verticalSpeed, vsVal)
 
 		if c, ok := lookupRecordMetric(r, []string{"Cadence", "EnhancedCadence"}); ok {
 			c = sanitizeCadence(c)
@@ -232,6 +255,14 @@ func parseFITFile(path string) (domain.Activity, error) {
 				strideSamplesM = append(strideSamplesM, slM)
 			}
 		}
+		st := r.GetStanceTimeScaled()
+		if !math.IsNaN(st) && st >= 140 && st <= 520 {
+			stanceVals = append(stanceVals, st)
+		}
+		if ub := uint8(r.LeftRightBalance); ub != 0xFF && isRunLikeSport(sport) {
+			pctR := float64(ub&0x7F) / 127.0 * 100.0
+			lateralVals = append(lateralVals, math.Abs(pctR-50.0))
+		}
 	}
 
 	if duration <= 0 && len(timeSec) > 1 {
@@ -244,6 +275,15 @@ func parseFITFile(path string) (domain.Activity, error) {
 	if avgStrideLengthM <= 0 && avgCadence > 0 && distanceKM > 0 && duration > 0 {
 		avgStrideLengthM = (distanceKM * 1000.0 / duration.Seconds()) * 60.0 / avgCadence
 	}
+
+	avgStance := meanOrZero(stanceVals)
+	if avgStance <= 0 && len(activity.Sessions) > 0 && activity.Sessions[0] != nil {
+		sm := activity.Sessions[0].GetAvgStanceTimeScaled()
+		if !math.IsNaN(sm) && sm >= 140 && sm <= 520 {
+			avgStance = sm
+		}
+	}
+	asymAvg := meanOrZero(lateralVals)
 
 	return domain.Activity{
 		ID:                       id,
@@ -258,9 +298,13 @@ func parseFITFile(path string) (domain.Activity, error) {
 		TimeSec:                  timeSec,
 		SpeedMS:                  speed,
 		Cadence:                  cadence,
+		AltitudeM:                altitude,
+		VerticalSpeedMS:          verticalSpeed,
 		AvgCadence:               avgCadence,
 		AvgVerticalOscillationCM: avgVerticalOscillationCM,
 		AvgStrideLengthM:         avgStrideLengthM,
+		AvgStanceTimeMs:          avgStance,
+		StrideAsymmetryPct:       asymAvg,
 	}, nil
 }
 

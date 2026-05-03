@@ -13,7 +13,11 @@
 - [x] Session classification + confidence + explain-the-run
 - [x] Run-only filter + dashboard deltas after reload
 - [x] **Multi-profile filesystem layout** (`profiles/<id>/data.json`, `cache.json`, `garmin/`) + legacy migration + `AEROBIX_PROFILE` + Settings profile id (restart to apply)
-- [x] **Load analytics (7d)** on dashboard: monotony, strain, CTL ramp
+- [x] **Load analytics (7d)** on dashboard: monotony, strain, CTL ramp — plus **weekly stress index (WSI)**, **ATL/CTL**, and **7d ΣRSS**
+- [x] **Garmin FIT folder watcher** (`fsnotify`): dropping `.fit` files triggers debounced auto-import + best-effort **desktop notification** (macOS / Linux); queues safely if Strava or Garmin load is already in flight
+- [x] **Terrain-aware metrics (v1)**: modeled **GAP**, uphill time share, downhill braking proxy from elevation / vertical-speed streams where present in FIT-derived activities
+- [x] **Ground contact proxy + stride asymmetry** from FIT stance/balance telemetry when watches record it
+- [x] **Running Stress Score-style load (RSS)** from running-power streams versus FTP-ref scale (sessions + weekly rollups where power exists)
 
 ## Near Term
 
@@ -27,12 +31,12 @@
 
 ## Mid Term
 
-Detailed tracking for previously listed capabilities:
+Deeper polish on metrics already seeded above:
 
-- [ ] **Terrain-aware metrics**: grade-adjusted pace (GAP), uphill efficiency, downhill eccentric-load proxy from elevation streams
-- [ ] **Better load analytics**: refine monotony/strain formulas, weekly training stress index, chronic workload comparisons
-- [ ] **Ground contact time (GCT) + asymmetry** from FIT records when present (`stance_time`, balance fields / vendor-specific)
-- [ ] **Running Stress Score (RSS)** when running power is available (Stryd / Garmin Running Power): duration × intensity² style load
+- [ ] **Terrain**: refine grade model (wind, surface), compare to vendor GAP where available
+- [ ] **Load analytics**: revisit monotony/strain formulations; richer chronic-vs-acute views (rolling windows beyond ATL/CTL)
+- [ ] **GCT / asymmetry**: parse more vendor-specific FIT messages; intra-run distributions, not just session averages
+- [ ] **RSS**: optional device-calibrated cadence/power scaling; align with vendor RSS when identifiable in FIT metadata
 - [ ] Recovery index using resting HR / HRV when ingestible from FIT or wellness files
 
 ## Longer Term
