@@ -10,6 +10,10 @@ type LoadAnalytics7d struct {
 	// WeeklyStressIndex folds monotony into a single week stress scalar (ΔCTL scaled).
 	WeeklyStressIndex float64
 	ATLCTL            float64 // acute/chronic workload ratio from latest PMC snapshot
+	Acute7dAvg        float64 // rolling acute load proxy from daily TSS
+	Chronic28dAvg     float64 // rolling chronic load proxy from daily TSS
+	Acwr7Over28       float64 // acute/chronic ratio over 7d vs 28d windows
+	Ramp28dPerWeek    float64 // CTL change rate over the last 28 days
 	RSS7dSum          float64 // optional running squared-power load summed over 7d (see UI)
 	HasData           bool
 }
@@ -78,11 +82,50 @@ func LoadAnalyticsFromPMC(pmc []PMCPoint) LoadAnalytics7d {
 			acwr = last.ATL / last.CTL
 		}
 	}
+	acute7, chronic28, acwr7over28 := rollingAcuteChronic(pmc)
+	ramp28 := 0.0
+	if len(pmc) >= 29 {
+		now := pmc[len(pmc)-1].CTL
+		past := pmc[len(pmc)-29].CTL
+		ramp28 = (now - past) / 4.0
+	}
 	out.Monotony = monotony
 	out.Strain = strain
 	out.RampPerDay = ramp
 	out.WeeklyStressIndex = wsi
 	out.ATLCTL = acwr
+	out.Acute7dAvg = acute7
+	out.Chronic28dAvg = chronic28
+	out.Acwr7Over28 = acwr7over28
+	out.Ramp28dPerWeek = ramp28
 	out.HasData = true
 	return out
+}
+
+func rollingAcuteChronic(pmc []PMCPoint) (acute7d, chronic28d, ratio float64) {
+	if len(pmc) == 0 {
+		return 0, 0, 0
+	}
+	n7 := minInt(7, len(pmc))
+	n28 := minInt(28, len(pmc))
+	var s7, s28 float64
+	for i := len(pmc) - n7; i < len(pmc); i++ {
+		s7 += pmc[i].DailyTSS
+	}
+	for i := len(pmc) - n28; i < len(pmc); i++ {
+		s28 += pmc[i].DailyTSS
+	}
+	acute7d = s7 / float64(n7)
+	chronic28d = s28 / float64(n28)
+	if chronic28d > 1e-3 {
+		ratio = acute7d / chronic28d
+	}
+	return acute7d, chronic28d, ratio
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

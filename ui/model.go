@@ -92,6 +92,7 @@ type activitySummary struct {
 	DownhillBrakeLoad float64
 	RSSPoints         float64
 	RSSSource         string
+	RSSCalibration    float64
 }
 
 type dashboardDelta struct {
@@ -104,7 +105,7 @@ type dashboardDelta struct {
 	TSBP float64
 }
 
-var navItems = []string{"Dashboard", "Activities", "Garmin (Beta)", "Settings"}
+var navItems = []string{"Dashboard", "Strava", "Garmin (Beta)", "Settings"}
 
 // chromeAppPad* match appStyle padding so the scroll viewport fills the usable area.
 const (
@@ -383,7 +384,7 @@ func (m Model) dispatchUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mainViewport.GotoTop()
 			}
 		case "up", "k":
-			if navItems[m.navCursor] == "Activities" {
+			if navItems[m.navCursor] == "Strava" {
 				if m.activityCursor > 0 {
 					m.activityCursor--
 				}
@@ -401,7 +402,7 @@ func (m Model) dispatchUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.garminTable.UpdateViewport()
 			}
 		case "down", "j":
-			if navItems[m.navCursor] == "Activities" {
+			if navItems[m.navCursor] == "Strava" {
 				if m.activityCursor < len(m.summaries)-1 {
 					m.activityCursor++
 				}
@@ -602,7 +603,7 @@ func (m Model) renderScrollableMainBody() string {
 	switch navItems[m.navCursor] {
 	case "Dashboard":
 		content = m.renderDashboard()
-	case "Activities":
+	case "Strava":
 		content = m.renderActivities()
 	case "Garmin (Beta)":
 		content = m.renderGarmin()
@@ -658,7 +659,7 @@ func (m Model) renderActivities() string {
 	if m.activityCursor >= 0 && m.activityCursor < len(m.summaries) {
 		details = m.renderDetails(m.summaries[m.activityCursor])
 	}
-	return titleStyle.Render("Activities") + "\n\n" + m.activityTable.View() + "\n\n" + details
+	return titleStyle.Render("Strava") + "\n\n" + m.activityTable.View() + "\n\n" + details
 }
 
 func (m Model) renderGarmin() string {
@@ -930,6 +931,7 @@ func maskIfNeeded(v string, secret bool) string {
 func newActivityTable(summaries []activitySummary) table.Model {
 	columns := []table.Column{
 		{Title: "Date", Width: 12},
+		{Title: "Type", Width: 10},
 		{Title: "Title", Width: 24},
 		{Title: "Dur", Width: 7},
 		{Title: "Pace", Width: 9},
@@ -943,6 +945,7 @@ func newActivityTable(summaries []activitySummary) table.Model {
 	for _, s := range summaries {
 		rows = append(rows, table.Row{
 			s.Activity.StartTime.Format("2006-01-02"),
+			activityTypeLabel(s.Activity),
 			s.Activity.Name,
 			s.Duration,
 			s.AvgPace,
@@ -1007,6 +1010,7 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 		brakeLoad := 0.0
 		rssPts := 0.0
 		rssSrc := ""
+		rssCal := 1.0
 		if isRunSport(a.Sport) {
 			if g := physics.GradeAdjustedAvgPaceMinKm(a); !math.IsNaN(g) && g > 0 && g < 45 {
 				gapText = formatPaceFromMinPerKm(g)
@@ -1015,8 +1019,8 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 			brakeLoad = physics.DownhillBrakingLoad(a)
 			if settings.FTP > 1 && hasUsablePower(a.Power) {
 				rawRSS := physics.RunningSquaredPowerLoad(a.Power, a.TimeSec, settings.FTP)
-				rssPts = sanitizeRSS(rawRSS / 36.0)
-				rssSrc = "run-power/FTP-ref"
+				rssCal, rssSrc = rssCalibration(a)
+				rssPts = sanitizeRSS((rawRSS / 36.0) * rssCal)
 			}
 		}
 		out = append(out, activitySummary{
@@ -1052,6 +1056,7 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 			DownhillBrakeLoad: brakeLoad,
 			RSSPoints:         rssPts,
 			RSSSource:         rssSrc,
+			RSSCalibration:    rssCal,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Activity.StartTime.After(out[j].Activity.StartTime) })
@@ -1080,6 +1085,25 @@ func sanitizeRSS(v float64) float64 {
 		return maxReasonableRSS
 	}
 	return v
+}
+
+func rssCalibration(a domain.Activity) (factor float64, source string) {
+	// Lightweight v1 calibration: cadence-informed scaling to reduce systematic
+	// bias between wrist-native running power streams and FTP-ref RSS scaling.
+	base := 1.0
+	src := "run-power/FTP-ref"
+	if a.AvgCadence > 0 {
+		// Target ~176 spm as neutral for steady running.
+		cadFactor := 176.0 / a.AvgCadence
+		cadFactor = math.Max(0.92, math.Min(1.08, cadFactor))
+		base *= cadFactor
+		src += "+cadence-cal"
+	}
+	if strings.Contains(strings.ToLower(a.Sport), "trail") {
+		base *= 1.03
+		src += "+trail"
+	}
+	return base, src
 }
 
 func formatPaceFromMinPerKm(minPerKm float64) string {
@@ -1320,6 +1344,22 @@ func renderRunningEconomy(s activitySummary) string {
 	if s.Activity.StrideAsymmetryPct > 0 {
 		txt += fmt.Sprintf("\nStride asymmetry: %.1f%%", s.Activity.StrideAsymmetryPct)
 	}
+	if s.Activity.StanceTimeP90Ms > 0 {
+		txt += fmt.Sprintf(
+			"\nGCT distribution p10/p50/p90: %.0f / %.0f / %.0f ms",
+			s.Activity.StanceTimeP10Ms,
+			s.Activity.StanceTimeP50Ms,
+			s.Activity.StanceTimeP90Ms,
+		)
+	}
+	if s.Activity.AsymmetryP90Pct > 0 {
+		txt += fmt.Sprintf(
+			"\nAsym distribution p10/p50/p90: %.1f / %.1f / %.1f%%",
+			s.Activity.AsymmetryP10Pct,
+			s.Activity.AsymmetryP50Pct,
+			s.Activity.AsymmetryP90Pct,
+		)
+	}
 	return txt
 }
 
@@ -1339,7 +1379,7 @@ func renderTerrainLoadBlock(s activitySummary) string {
 		fmt.Fprintf(&b, "Descent braking proxy (trend units): %.1f\n", s.DownhillBrakeLoad)
 	}
 	if s.RSSPoints > 0 {
-		fmt.Fprintf(&b, "RSS (∫ power² vs FTP-ref, TSS analog): %.0f (%s)", s.RSSPoints, s.RSSSource)
+		fmt.Fprintf(&b, "RSS (∫ power² vs FTP-ref, TSS analog): %.0f (%s, cal %.2f)", s.RSSPoints, s.RSSSource, s.RSSCalibration)
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -1424,12 +1464,16 @@ func renderLoadAnalytics(pmc []physics.PMCPoint, summaries []activitySummary) st
 		rssPart = fmt.Sprintf(" | ΣRSS(7d) %.0f", rss7)
 	}
 	return fmt.Sprintf(
-		"Load analytics (7d)\nMonotony %.2f (repetitive load) | Strain %.0f | CTL ramp %.2f / day | WSI %.0f | ATL/CTL %.2f%s",
+		"Load analytics (7d)\nMonotony %.2f | Strain %.0f | CTL ramp %.2f / day | WSI %.0f | ATL/CTL %.2f\nAcute7 %.1f | Chronic28 %.1f | ACWR(7/28) %.2f | 28d ramp %.2f / week%s",
 		la.Monotony,
 		la.Strain,
 		la.RampPerDay,
 		la.WeeklyStressIndex,
 		la.ATLCTL,
+		la.Acute7dAvg,
+		la.Chronic28dAvg,
+		la.Acwr7Over28,
+		la.Ramp28dPerWeek,
 		rssPart,
 	)
 }
@@ -1517,6 +1561,39 @@ func zoneLegend() string {
 func isRunSport(sport string) bool {
 	s := strings.ToLower(sport)
 	return strings.Contains(s, "run") || strings.Contains(s, "walk") || strings.Contains(s, "trail")
+}
+
+func activityTypeLabel(a domain.Activity) string {
+	s := strings.ToLower(strings.TrimSpace(a.Sport))
+	name := strings.ToLower(strings.TrimSpace(a.Name))
+	text := s + " " + name
+	switch {
+	case strings.Contains(text, "walk"), strings.Contains(text, "hike"), strings.Contains(text, "trek"):
+		return "Walk/Hike"
+	case strings.Contains(text, "swim"), strings.Contains(text, "pool"), strings.Contains(text, "openwater"):
+		return "Swim"
+	case strings.Contains(text, "strength"), strings.Contains(text, "weight"), strings.Contains(text, "gym"), strings.Contains(text, "workout"):
+		return "Strength"
+	case strings.Contains(text, "yoga"), strings.Contains(text, "pilates"), strings.Contains(text, "mobility"):
+		return "Mobility"
+	case strings.Contains(text, "ride"), strings.Contains(text, "bike"), strings.Contains(text, "cycling"), strings.Contains(text, "ebike"), strings.Contains(text, "virtualride"):
+		return "Ride"
+	case strings.Contains(text, "run"), strings.Contains(text, "trail"):
+		return "Run"
+	case strings.Contains(text, "row"):
+		return "Row"
+	case strings.Contains(text, "ski"), strings.Contains(text, "snowboard"):
+		return "Ski"
+	default:
+		if s == "" || s == "generic" || s == "unknown" {
+			return "Other"
+		}
+		raw := strings.TrimSpace(a.Sport)
+		if raw == "" {
+			return "Other"
+		}
+		return strings.ToUpper(raw[:1]) + raw[1:]
+	}
 }
 
 func totalZoneMinutes(z [5]float64) float64 {

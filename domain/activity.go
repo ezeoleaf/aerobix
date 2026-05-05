@@ -27,8 +27,14 @@ type Activity struct {
 
 	// Ground contact mechanics when present on running watches (milliseconds, FIT stance_time).
 	AvgStanceTimeMs float64
+	StanceTimeP10Ms float64
+	StanceTimeP50Ms float64
+	StanceTimeP90Ms float64
 	// StrideAsymmetryPct is |right% - 50| from stride balance telemetry (0 = even split).
 	StrideAsymmetryPct float64
+	AsymmetryP10Pct    float64
+	AsymmetryP50Pct    float64
+	AsymmetryP90Pct    float64
 }
 
 type AthleteProfile struct {

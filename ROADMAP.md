@@ -33,10 +33,10 @@
 
 Deeper polish on metrics already seeded above:
 
-- [ ] **Terrain**: refine grade model (wind, surface), compare to vendor GAP where available
-- [ ] **Load analytics**: revisit monotony/strain formulations; richer chronic-vs-acute views (rolling windows beyond ATL/CTL)
-- [ ] **GCT / asymmetry**: parse more vendor-specific FIT messages; intra-run distributions, not just session averages
-- [ ] **RSS**: optional device-calibrated cadence/power scaling; align with vendor RSS when identifiable in FIT metadata
+- [x] **Terrain (v1.1)**: refined grade model curve for uphill/downhill cost and braking penalty; still room for wind/surface and vendor GAP comparison
+- [x] **Load analytics (v1.1)**: richer chronic-vs-acute views added (`Acute7`, `Chronic28`, `ACWR 7/28`, `28d ramp/week`) beyond ATL/CTL
+- [x] **GCT / asymmetry (v1.1)**: FIT ingest now surfaces intra-run distributions (`p10/p50/p90`) for stance time and asymmetry
+- [x] **RSS (v1.1)**: optional cadence-calibrated RSS scaling + source tags; vendor-alignment remains future refinement when explicit metadata is available
 - [ ] Recovery index using resting HR / HRV when ingestible from FIT or wellness files
 
 ## Longer Term

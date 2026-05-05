@@ -164,7 +164,7 @@ func parseFITFile(path string) (domain.Activity, error) {
 	start := time.Now()
 	distanceKM := 0.0
 	duration := 0 * time.Second
-	sport := "Run"
+	sport := "Other"
 
 	if len(activity.Sessions) > 0 {
 		s := activity.Sessions[0]
@@ -180,8 +180,8 @@ func parseFITFile(path string) (domain.Activity, error) {
 			seconds := float64(s.TotalElapsedTime) / 1000.0
 			duration = time.Duration(seconds * float64(time.Second))
 		}
-		if s.Sport.String() != "" {
-			sport = s.Sport.String()
+		if sp := strings.TrimSpace(s.Sport.String()); sp != "" && !strings.EqualFold(sp, "generic") {
+			sport = sp
 		}
 	}
 
@@ -284,6 +284,8 @@ func parseFITFile(path string) (domain.Activity, error) {
 		}
 	}
 	asymAvg := meanOrZero(lateralVals)
+	stanceP10, stanceP50, stanceP90 := percentiles3(stanceVals)
+	asymP10, asymP50, asymP90 := percentiles3(lateralVals)
 
 	return domain.Activity{
 		ID:                       id,
@@ -304,7 +306,13 @@ func parseFITFile(path string) (domain.Activity, error) {
 		AvgVerticalOscillationCM: avgVerticalOscillationCM,
 		AvgStrideLengthM:         avgStrideLengthM,
 		AvgStanceTimeMs:          avgStance,
+		StanceTimeP10Ms:          stanceP10,
+		StanceTimeP50Ms:          stanceP50,
+		StanceTimeP90Ms:          stanceP90,
 		StrideAsymmetryPct:       asymAvg,
+		AsymmetryP10Pct:          asymP10,
+		AsymmetryP50Pct:          asymP50,
+		AsymmetryP90Pct:          asymP90,
 	}, nil
 }
 
@@ -445,6 +453,35 @@ func meanOrZero(v []float64) float64 {
 		sum += x
 	}
 	return sum / float64(len(v))
+}
+
+func percentiles3(v []float64) (p10, p50, p90 float64) {
+	if len(v) == 0 {
+		return 0, 0, 0
+	}
+	cp := append([]float64(nil), v...)
+	sort.Float64s(cp)
+	return percentile(cp, 0.10), percentile(cp, 0.50), percentile(cp, 0.90)
+}
+
+func percentile(sorted []float64, q float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	if q <= 0 {
+		return sorted[0]
+	}
+	if q >= 1 {
+		return sorted[len(sorted)-1]
+	}
+	pos := q * float64(len(sorted)-1)
+	lo := int(math.Floor(pos))
+	hi := int(math.Ceil(pos))
+	if lo == hi {
+		return sorted[lo]
+	}
+	w := pos - float64(lo)
+	return sorted[lo]*(1-w) + sorted[hi]*w
 }
 
 func isRunLikeSport(sport string) bool {

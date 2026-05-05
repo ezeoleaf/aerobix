@@ -54,9 +54,7 @@ func GradeAdjustedAvgPaceMinKm(a domain.Activity) float64 {
 			continue
 		}
 		gradePct := 100 * dElev / hDist // small-angle pct grade
-		// Clamp correction factor — crude but stable outdoors.
-		corr := 1 + 0.055*gradePct
-		corr = math.Max(0.55, math.Min(3.0, corr))
+		corr := gradeCostFactor(gradePct)
 		secPerKm := 1000 / avgSp
 		gap := secPerKm / corr
 		sumGap += gap * hDist
@@ -203,4 +201,23 @@ func RunningSquaredPowerLoad(power []float64, timeSec []int, refW float64) float
 
 func clamp(v, lo, hi float64) float64 {
 	return math.Max(lo, math.Min(hi, v))
+}
+
+func gradeCostFactor(gradePct float64) float64 {
+	// Suppress barometric micro-noise while preserving real slopes.
+	g := clamp(gradePct, -18.0, 22.0)
+	ag := math.Abs(g)
+	base := 1.0
+	switch {
+	case g >= 0:
+		// Uphill cost rises nonlinearly past ~6% grade.
+		base += 0.048*g + 0.0018*g*g
+	default:
+		// Downhill gets faster up to moderate grades, then braking cost climbs.
+		base += 0.024*g + 0.0007*ag*ag
+		if g < -9 {
+			base += 0.0016 * (ag - 9) * (ag - 9)
+		}
+	}
+	return clamp(base, 0.55, 2.9)
 }
