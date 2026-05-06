@@ -58,6 +58,11 @@ var (
 			BorderForeground(lipgloss.Color("238")).
 			Padding(0, 1)
 
+	coachBubbleStyle = lipgloss.NewStyle().
+				Padding(0, 1).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("42"))
+
 	goodStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	warnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	badStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))

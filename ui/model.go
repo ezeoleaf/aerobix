@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"aerobix/ai"
 	"aerobix/domain"
 	"aerobix/garminfit"
 	"aerobix/paths"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -58,6 +60,11 @@ type exchangeMsg struct {
 	err error
 }
 
+type aiResponseMsg struct {
+	content string
+	err     error
+}
+
 type activitySummary struct {
 	Activity        domain.Activity
 	NP              float64
@@ -88,11 +95,15 @@ type activitySummary struct {
 	HRZones         [5]float64
 
 	GapPaceText       string
+	GapConfidence     string
 	UphillTimePct     float64
 	DownhillBrakeLoad float64
 	RSSPoints         float64
 	RSSSource         string
 	RSSCalibration    float64
+	RSSConfidence     string
+	RefPowerW         float64
+	RefPowerLabel     string
 }
 
 type dashboardDelta struct {
@@ -105,7 +116,7 @@ type dashboardDelta struct {
 	TSBP float64
 }
 
-var navItems = []string{"Dashboard", "Strava", "Garmin (Beta)", "Settings"}
+var navItems = []string{"Dashboard", "Strava", "Garmin", "AI Insights", "Settings"}
 
 // chromeAppPad* match appStyle padding so the scroll viewport fills the usable area.
 const (
@@ -162,6 +173,11 @@ type Model struct {
 	pendingGarminFITRescan bool
 
 	mainViewport viewport.Model
+
+	aiInput    textinput.Model
+	aiViewport viewport.Model
+	aiHistory  []ai.CoachMessage
+	aiBusy     bool
 }
 
 func NewModel(dataProvider provider.DataProvider, fitNotify chan<- tea.Msg) Model {
@@ -186,8 +202,32 @@ func NewModel(dataProvider provider.DataProvider, fitNotify chan<- tea.Msg) Mode
 		fitNotifyChan:    fitNotify,
 		fitWatcherCtl:    ctl,
 		mainViewport:     newMainViewport(),
+		aiInput:          newAIInput(),
+		aiViewport:       newAIVIewport(),
 	}
+	m.aiHistory = []ai.CoachMessage{{
+		Role:    "coach",
+		Content: "Coach ready. Ask anything about training load, recovery, intensity, or type /report for a weekly summary.",
+	}}
 	return m.applyWindowLayout(80, 24)
+}
+
+func newAIInput() textinput.Model {
+	in := textinput.New()
+	in.Placeholder = "Ask coach... (/report for weekly summary)"
+	in.Prompt = "You> "
+	in.CharLimit = 500
+	in.Focus()
+	return in
+}
+
+func newAIVIewport() viewport.Model {
+	vp := viewport.New(0, 0)
+	vp.Style = lipgloss.NewStyle().
+		Padding(0, 1).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240"))
+	return vp
 }
 
 func newMainViewport() viewport.Model {
@@ -240,10 +280,17 @@ func (m Model) dispatchUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m = m.applyWindowLayout(msg.Width, msg.Height)
+		m.aiViewport.SetContent(m.renderAIConversation())
 		return m, nil
 	case tea.MouseMsg:
 		if m.profilePickerOpen || m.createProfileOpen || m.editMode {
 			return m, nil
+		}
+		if navItems[m.navCursor] == "AI Insights" {
+			var vpCmd tea.Cmd
+			m.aiViewport.SetContent(m.renderAIConversation())
+			m.aiViewport, vpCmd = m.aiViewport.Update(msg)
+			return m, vpCmd
 		}
 		m.mainViewport.SetContent(m.renderScrollableMainBody())
 		var vpCmd tea.Cmd
@@ -299,6 +346,22 @@ func (m Model) dispatchUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "Connected to Strava. Reloading activities..."
 		m.loading = true
 		return m, tea.Batch(m.loadActivitiesCmd(true), spinnerTickCmd())
+	case aiResponseMsg:
+		m.aiBusy = false
+		if msg.err != nil {
+			m.aiHistory = append(m.aiHistory, ai.CoachMessage{
+				Role:    "coach",
+				Content: "Coach error: " + msg.err.Error(),
+			})
+			return m, nil
+		}
+		m.aiHistory = append(m.aiHistory, ai.CoachMessage{
+			Role:    "coach",
+			Content: strings.TrimSpace(msg.content),
+		})
+		m.aiViewport.SetContent(m.renderAIConversation())
+		m.aiViewport.GotoBottom()
+		return m, nil
 	case garminFITWatchTriggerMsg:
 		if len(msg.Paths) == 0 {
 			return m, nil
@@ -353,6 +416,9 @@ func (m Model) dispatchUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.editMode {
 			return m.handleEditKeys(msg)
 		}
+		if navItems[m.navCursor] == "AI Insights" {
+			return m.handleAIKeys(msg)
+		}
 		m.mainViewport.SetContent(m.renderScrollableMainBody())
 		m.mainViewport, _ = m.mainViewport.Update(msg)
 		switch msg.String() {
@@ -394,7 +460,7 @@ func (m Model) dispatchUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if navItems[m.navCursor] == "Settings" && m.settingsCursor > 0 {
 				m.settingsCursor--
 			}
-			if navItems[m.navCursor] == "Garmin (Beta)" {
+			if navItems[m.navCursor] == "Garmin" {
 				if m.garminCursor > 0 {
 					m.garminCursor--
 				}
@@ -409,10 +475,10 @@ func (m Model) dispatchUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activityTable.MoveDown(1)
 				m.activityTable.UpdateViewport()
 			}
-			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 13 {
+			if navItems[m.navCursor] == "Settings" && m.settingsCursor < 19 {
 				m.settingsCursor++
 			}
-			if navItems[m.navCursor] == "Garmin (Beta)" {
+			if navItems[m.navCursor] == "Garmin" {
 				if m.garminCursor < len(m.garminSumm)-1 {
 					m.garminCursor++
 				}
@@ -538,6 +604,46 @@ func (m Model) handleEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleAIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.aiViewport.SetContent(m.renderAIConversation())
+	m.aiViewport, _ = m.aiViewport.Update(msg)
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "left", "h":
+		if m.navCursor > 0 {
+			m.navCursor--
+		}
+		return m, nil
+	case "right", "l":
+		if m.navCursor < len(navItems)-1 {
+			m.navCursor++
+		}
+		return m, nil
+	case "enter":
+		if m.aiBusy {
+			return m, nil
+		}
+		q := strings.TrimSpace(m.aiInput.Value())
+		if q == "" {
+			return m, nil
+		}
+		if q == "/report" {
+			q = "Give me a summary of my current training state and recommendations for the week."
+		}
+		m.aiInput.SetValue("")
+		m.aiHistory = append(m.aiHistory, ai.CoachMessage{Role: "user", Content: q})
+		m.aiBusy = true
+		m.aiViewport.SetContent(m.renderAIConversation())
+		m.aiViewport.GotoBottom()
+		return m, m.askCoachCmd(q)
+	}
+	var cmd tea.Cmd
+	m.aiInput, cmd = m.aiInput.Update(msg)
+	m.aiViewport.SetContent(m.renderAIConversation())
+	return m, cmd
+}
+
 func (m Model) View() string {
 	if m.profilePickerOpen {
 		return m.renderProfilePickerScreen()
@@ -563,6 +669,9 @@ func (m Model) applyWindowLayout(w, h int) Model {
 	vpH := max(6, innerH-chromeHeaderReserve-chromeFooterReserve)
 	m.mainViewport.Width = contentW
 	m.mainViewport.Height = vpH
+	m.aiViewport.Width = contentW - 2
+	m.aiViewport.Height = max(6, vpH-6)
+	m.aiInput.Width = max(24, contentW-10)
 	tw := max(contentW-6, 40)
 	th := max(6, min(16, vpH/3))
 	m.activityTable.SetWidth(tw)
@@ -588,7 +697,7 @@ func (m Model) renderHeaderTabs() string {
 
 func (m Model) renderFooter() string {
 	w := max(20, m.width-chromeAppPadH)
-	keys := "h/l tabs · j/k lists · P profiles · r Strava · g Garmin · p dash · PgUp/PgDn scroll · Ctrl+u/d · wheel · q quit"
+	keys := "h/l tabs · j/k lists · AI: Enter send /report · P profiles · r Strava · g Garmin · p dash · PgUp/PgDn scroll · Ctrl+u/d · wheel · q quit"
 	line1 := ansi.Truncate(keys, w, "…")
 	st := strings.TrimSpace(m.status)
 	if st == "" {
@@ -605,8 +714,10 @@ func (m Model) renderScrollableMainBody() string {
 		content = m.renderDashboard()
 	case "Strava":
 		content = m.renderActivities()
-	case "Garmin (Beta)":
+	case "Garmin":
 		content = m.renderGarmin()
+	case "AI Insights":
+		content = m.renderAIInsights()
 	default:
 		content = m.renderSettings()
 	}
@@ -615,6 +726,16 @@ func (m Model) renderScrollableMainBody() string {
 		loading = "\n\n" + spinnerFrames[m.spinnerFrame] + " Loading..."
 	}
 	return content + loading
+}
+
+func (m Model) renderAIInsights() string {
+	head := titleStyle.Render("AI Insights")
+	hint := mutedStyle.Render("Coach persona · Enter send · /report weekly summary")
+	in := m.aiInput.View()
+	if m.aiBusy {
+		in = mutedStyle.Render("Coach is thinking...")
+	}
+	return head + "\n\n" + hint + "\n\n" + m.aiViewport.View() + "\n\n" + in
 }
 
 var spinnerFrames = []string{"|", "/", "-", "\\"}
@@ -647,11 +768,12 @@ func (m Model) renderDashboard() string {
 	loadAnalytics := subtleBoxStyle.Render(renderLoadAnalytics(currentPMC, currentSummaries))
 	weekly := subtleBoxStyle.Render(renderWeeklySummary(currentSummaries))
 	runPerf := subtleBoxStyle.Render(renderRunPerformanceSummary(currentSummaries))
+	durabilityTrend := subtleBoxStyle.Render(renderDurabilityTrend(currentSummaries))
 	trends := subtleBoxStyle.Render(renderMetricTrends(currentSummaries))
 	deltas := subtleBoxStyle.Render(m.renderDashboardDelta())
 	explain := subtleBoxStyle.Render(renderMeaningLegend(last))
 	selector := subtleBoxStyle.Render(m.renderDashboardProviderSelector())
-	return titleStyle.Render("Dashboard") + "\n\n" + selector + "\n\n" + top + "\n\n" + readiness + "\n\n" + deltas + "\n\n" + loadAnalytics + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
+	return titleStyle.Render("Dashboard") + "\n\n" + selector + "\n\n" + top + "\n\n" + readiness + "\n\n" + deltas + "\n\n" + loadAnalytics + "\n\n" + weekly + "\n\n" + runPerf + "\n\n" + durabilityTrend + "\n\n" + trends + "\n\n" + graph + "\n\n" + explain
 }
 
 func (m Model) renderActivities() string {
@@ -667,13 +789,14 @@ func (m Model) renderGarmin() string {
 	if m.garminCursor >= 0 && m.garminCursor < len(m.garminSumm) {
 		details = m.renderDetails(m.garminSumm[m.garminCursor])
 	}
-	return titleStyle.Render("Garmin (Beta)") + "\n\n" + m.garminTable.View() + "\n\n" + details
+	return titleStyle.Render("Garmin") + "\n\n" + m.garminTable.View() + "\n\n" + details
 }
 
 func (m Model) renderSettings() string {
 	fields := []string{
 		fmt.Sprintf("Athlete Name: %s", m.settings.AthleteName),
 		fmt.Sprintf("FTP: %.0f", m.settings.FTP),
+		fmt.Sprintf("Run Threshold Power (rFTP): %.0f", m.settings.RunThresholdPower),
 		fmt.Sprintf("Age: %d", m.settings.Age),
 		fmt.Sprintf("Max HR override: %.0f", m.settings.MaxHeartRate),
 		fmt.Sprintf("HR Z1 max (bpm): %.0f", m.settings.HRZone1Max),
@@ -681,17 +804,38 @@ func (m Model) renderSettings() string {
 		fmt.Sprintf("HR Z3 max (bpm): %.0f", m.settings.HRZone3Max),
 		fmt.Sprintf("HR Z4 max (bpm): %.0f", m.settings.HRZone4Max),
 		fmt.Sprintf("Garmin FIT dir: %s", maskIfNeeded(m.settings.GarminFITDir, false)),
+		fmt.Sprintf("Coros FIT dir: %s", maskIfNeeded(m.settings.CorosFITDir, false)),
+		fmt.Sprintf("Polar FIT dir: %s", maskIfNeeded(m.settings.PolarFITDir, false)),
+		fmt.Sprintf("AI provider_type (openai|anthropic|ollama): %s", maskIfNeeded(m.settings.AIProviderType, false)),
+		fmt.Sprintf("AI api_key: %s", maskIfNeeded(m.settings.AIAPIKey, true)),
+		fmt.Sprintf("AI base_url: %s", maskIfNeeded(m.settings.AIBaseURL, false)),
 		fmt.Sprintf("Run activities only: %t", m.settings.RunOnly),
 		fmt.Sprintf("Client ID: %s", maskIfNeeded(m.settings.ClientID, false)),
 		fmt.Sprintf("Client Secret: %s", maskIfNeeded(m.settings.ClientSecret, true)),
 		fmt.Sprintf("Profile ID (P to switch, s saves): %s", m.profileIDSetting),
 		fmt.Sprintf("Auth Code: %s", maskIfNeeded(m.currentAuthCode(), false)),
 	}
-	for i := range fields {
+	sections := map[int]string{
+		0:  "Profile",
+		1:  "Training Power",
+		4:  "Heart Rate",
+		9:  "FIT Folders",
+		12: "AI",
+		15: "Strava Auth",
+		18: "Profile Control",
+	}
+	lines := make([]string, 0, len(fields)+8)
+	for i, f := range fields {
+		if hdr, ok := sections[i]; ok {
+			if len(lines) > 0 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, titleStyle.Render(hdr))
+		}
 		if i == m.settingsCursor {
-			fields[i] = navItemActiveStyle.Render("-> " + fields[i])
+			lines = append(lines, navItemActiveStyle.Render("-> "+f))
 		} else {
-			fields[i] = navItemStyle.Render("   " + fields[i])
+			lines = append(lines, navItemStyle.Render("   "+f))
 		}
 	}
 	edit := ""
@@ -706,12 +850,12 @@ func (m Model) renderSettings() string {
 		edit = fmt.Sprintf("\n\nEditing: %s", m.inputBuffer)
 	}
 	return fmt.Sprintf(
-		"%s\n\nProvider: %s\nConnected: %t%s\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n\nActions:\n- e edit selected field\n- n create new profile folder & switch\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- g imports Garmin FIT; dropping .fit files into Garmin FIT dir also auto-imports (debounced) with a desktop notify when OS supports it",
+		"%s\n\nProvider: %s\nConnected: %t%s\n\n%s\n\nDefaults if zones are empty:\n- Uses 220-age max HR (or override), with 60/70/80/90%% splits\n- Run activities use Run Threshold Power when set; otherwise FTP\n\nActions:\n- e edit selected field\n- n create new profile folder & switch\n- o toggle Run activities only\n- s save settings\n- a open Strava auth page\n- x exchange auth code\n- g imports Garmin FIT; dropping .fit files into Garmin FIT dir also auto-imports (debounced) with a desktop notify when OS supports it\n- Coros/Polar have separate profile folders (coros/, polar/) for FIT imports",
 		titleStyle.Render("Settings"),
 		m.dataProvider.Name(),
 		m.settings.Connected,
 		profileEnvOverrideNote(),
-		strings.Join(fields, "\n"),
+		strings.Join(lines, "\n"),
 	) + edit
 }
 
@@ -752,9 +896,25 @@ func (m Model) renderDetails(s activitySummary) string {
 	}
 	loadBits += fmt.Sprintf(" | TRIMP %.1f | EF(speed/HR) %.4f", s.TRIMP, s.EFSpeed)
 
+	refLine := ""
+	if s.RefPowerW > 1 {
+		refLine = fmt.Sprintf("\nReference power for zones/load: %s %.0fW", s.RefPowerLabel, s.RefPowerW)
+	}
 	return fmt.Sprintf(
-		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\n%s\nDecoupling %.2f%%\nSession type: %s (%s)\nSession verdict: %s\n%s\n\n%s",
-		s.Activity.Name, s.Duration, s.AvgPace, s.AvgHR, loadBits, s.Decoupling, s.SessionClass, renderSessionConfidence(s.SessionConf), verdict, s.RunExplanation, detailGrid,
+		"Details: %s\nDuration %s | Pace %s | AvgHR %.0f bpm\n%s%s\nDecoupling %.2f%%\nSession type: %s (%s)\nClassification rationale: %s\nSession verdict: %s\n%s\n\n%s",
+		s.Activity.Name,
+		s.Duration,
+		s.AvgPace,
+		s.AvgHR,
+		loadBits,
+		refLine,
+		s.Decoupling,
+		s.SessionClass,
+		renderSessionConfidence(s.SessionConf),
+		renderClassificationRationale(s),
+		verdict,
+		s.RunExplanation,
+		detailGrid,
 	)
 }
 
@@ -802,6 +962,90 @@ func openBrowserCmd(url string) tea.Cmd {
 	}
 }
 
+func (m Model) askCoachCmd(userQuestion string) tea.Cmd {
+	settings := m.settings
+	history := append([]ai.CoachMessage(nil), m.aiHistory...)
+	context := m.prepareCoachContext()
+	return func() tea.Msg {
+		prov, err := m.aiProvider(settings)
+		if err != nil {
+			return aiResponseMsg{err: err}
+		}
+		prompt := ai.BuildCoachPrompt(context, history, userQuestion)
+		resp, err := prov.Chat(prompt)
+		return aiResponseMsg{content: resp, err: err}
+	}
+}
+
+func (m Model) aiProvider(s provider.Settings) (ai.AIProvider, error) {
+	pt := strings.ToLower(strings.TrimSpace(s.AIProviderType))
+	if pt == "" {
+		pt = "ollama"
+	}
+	switch pt {
+	case "openai":
+		return ai.OpenAIProvider{
+			APIKey:  s.AIAPIKey,
+			BaseURL: s.AIBaseURL,
+			Model:   "gpt-5.4-mini",
+		}, nil
+	case "anthropic", "claude":
+		return ai.AnthropicProvider{
+			APIKey:  s.AIAPIKey,
+			BaseURL: s.AIBaseURL,
+			Model:   "claude-sonnet-4.5",
+		}, nil
+	case "ollama", "local":
+		return ai.LocalOllamaProvider{
+			BaseURL: s.AIBaseURL,
+			Model:   "llama3.1",
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown ai provider_type %q", s.AIProviderType)
+	}
+}
+
+func (m Model) prepareCoachContext() string {
+	summaries := m.dashboardSummaries()
+	pmc := buildPMC(summaries)
+	last7TSS := 0.0
+	cutoff := time.Now().AddDate(0, 0, -7)
+	for _, s := range summaries {
+		if s.Activity.StartTime.Before(cutoff) {
+			continue
+		}
+		last7TSS += s.TSS
+	}
+	ctl, atl, tsb := 0.0, 0.0, 0.0
+	if len(pmc) > 0 {
+		last := pmc[len(pmc)-1]
+		ctl, atl, tsb = last.CTL, last.ATL, last.TSB
+	}
+	dec := 0.0
+	if len(summaries) > 0 {
+		dec = summaries[0].Decoupling
+	}
+	core := ai.PrepareContext(last7TSS, ctl, atl, tsb, dec)
+	bio := ai.GetAthleteBio(ctl, atl, tsb, dec)
+	return core + "\n" + bio
+}
+
+func (m Model) renderAIConversation() string {
+	if len(m.aiHistory) == 0 {
+		return mutedStyle.Render("No messages yet.")
+	}
+	var out []string
+	for _, msg := range m.aiHistory {
+		switch strings.ToLower(strings.TrimSpace(msg.Role)) {
+		case "coach":
+			out = append(out, coachBubbleStyle.Render("Coach\n"+strings.TrimSpace(msg.Content)))
+		default:
+			out = append(out, subtleBoxStyle.Render("You\n"+strings.TrimSpace(msg.Content)))
+		}
+	}
+	return strings.Join(out, "\n\n")
+}
+
 func (m *Model) persistSettings() error {
 	if err := paths.SetActiveProfile(m.profileIDSetting); err != nil {
 		return err
@@ -829,28 +1073,40 @@ func (m Model) currentSettingValue() string {
 	case 1:
 		return fmt.Sprintf("%.0f", m.settings.FTP)
 	case 2:
-		return fmt.Sprintf("%d", m.settings.Age)
+		return fmt.Sprintf("%.0f", m.settings.RunThresholdPower)
 	case 3:
-		return fmt.Sprintf("%.0f", m.settings.MaxHeartRate)
+		return fmt.Sprintf("%d", m.settings.Age)
 	case 4:
-		return fmt.Sprintf("%.0f", m.settings.HRZone1Max)
+		return fmt.Sprintf("%.0f", m.settings.MaxHeartRate)
 	case 5:
-		return fmt.Sprintf("%.0f", m.settings.HRZone2Max)
+		return fmt.Sprintf("%.0f", m.settings.HRZone1Max)
 	case 6:
-		return fmt.Sprintf("%.0f", m.settings.HRZone3Max)
+		return fmt.Sprintf("%.0f", m.settings.HRZone2Max)
 	case 7:
-		return fmt.Sprintf("%.0f", m.settings.HRZone4Max)
+		return fmt.Sprintf("%.0f", m.settings.HRZone3Max)
 	case 8:
-		return m.settings.GarminFITDir
+		return fmt.Sprintf("%.0f", m.settings.HRZone4Max)
 	case 9:
-		return strconv.FormatBool(m.settings.RunOnly)
+		return m.settings.GarminFITDir
 	case 10:
-		return m.settings.ClientID
+		return m.settings.CorosFITDir
 	case 11:
-		return m.settings.ClientSecret
+		return m.settings.PolarFITDir
 	case 12:
-		return m.profileIDSetting
+		return m.settings.AIProviderType
 	case 13:
+		return m.settings.AIAPIKey
+	case 14:
+		return m.settings.AIBaseURL
+	case 15:
+		return strconv.FormatBool(m.settings.RunOnly)
+	case 16:
+		return m.settings.ClientID
+	case 17:
+		return m.settings.ClientSecret
+	case 18:
+		return m.profileIDSetting
+	case 19:
 		return m.currentAuthCode()
 	default:
 		return ""
@@ -866,42 +1122,56 @@ func (m *Model) applyCurrentSetting(v string) {
 			m.settings.FTP = ftp
 		}
 	case 2:
+		if rftp, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && rftp >= 0 {
+			m.settings.RunThresholdPower = rftp
+		}
+	case 3:
 		if age, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && age > 0 {
 			m.settings.Age = age
 		}
-	case 3:
+	case 4:
 		if maxHR, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && maxHR >= 0 {
 			m.settings.MaxHeartRate = maxHR
 		}
-	case 4:
+	case 5:
 		if z, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && z >= 0 {
 			m.settings.HRZone1Max = z
 		}
-	case 5:
+	case 6:
 		if z, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && z >= 0 {
 			m.settings.HRZone2Max = z
 		}
-	case 6:
+	case 7:
 		if z, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && z >= 0 {
 			m.settings.HRZone3Max = z
 		}
-	case 7:
+	case 8:
 		if z, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && z >= 0 {
 			m.settings.HRZone4Max = z
 		}
-	case 8:
-		m.settings.GarminFITDir = strings.TrimSpace(v)
 	case 9:
+		m.settings.GarminFITDir = strings.TrimSpace(v)
+	case 10:
+		m.settings.CorosFITDir = strings.TrimSpace(v)
+	case 11:
+		m.settings.PolarFITDir = strings.TrimSpace(v)
+	case 12:
+		m.settings.AIProviderType = strings.TrimSpace(strings.ToLower(v))
+	case 13:
+		m.settings.AIAPIKey = strings.TrimSpace(v)
+	case 14:
+		m.settings.AIBaseURL = strings.TrimSpace(v)
+	case 15:
 		if b, err := strconv.ParseBool(strings.ToLower(strings.TrimSpace(v))); err == nil {
 			m.settings.RunOnly = b
 		}
-	case 10:
+	case 16:
 		m.settings.ClientID = strings.TrimSpace(v)
-	case 11:
+	case 17:
 		m.settings.ClientSecret = strings.TrimSpace(v)
-	case 12:
+	case 18:
 		m.profileIDSetting = strings.TrimSpace(v)
-	case 13:
+	case 19:
 		m.status = "Auth code captured. Press x to exchange."
 		m.setAuthCode(v)
 	}
@@ -978,11 +1248,16 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 	for _, a := range activities {
 		np, _ := physics.NormalizedPowerFromTime(a.Power, a.TimeSec)
 		avgHR, _ := physics.AvgHeartRate(a.HeartRate)
-		zones, basis := deriveZones(a, settings.FTP, hrBounds)
+		zoneRef := thresholdPowerForActivity(a, settings)
+		refLabel := "FTP"
+		if isRunSport(a.Sport) && settings.RunThresholdPower > 1 {
+			refLabel = "rFTP"
+		}
+		zones, basis := deriveZones(a, zoneRef, hrBounds)
 		hrZones, _ := physics.TimeInHeartRateZonesMinutesWithBounds(a.HeartRate, a.TimeSec, hrBounds)
 		trimp := physics.TRIMPFromZones(hrZones)
-		ifVal, _ := physics.IntensityFactor(np, settings.FTP)
-		tss, _ := physics.TrainingStressScore(int(a.Duration.Seconds()), np, ifVal, settings.FTP)
+		ifVal, _ := physics.IntensityFactor(np, zoneRef)
+		tss, _ := physics.TrainingStressScore(int(a.Duration.Seconds()), np, ifVal, zoneRef)
 		tssSource := "power"
 		if !hasUsablePower(a.Power) || np <= 0 || tss <= 0 {
 			tss = physics.EstimatedTSSFromHRZones(hrZones, int(a.Duration.Seconds()))
@@ -1006,21 +1281,25 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 		sessionConf := physics.SessionClassificationConfidence(a, hrZones, sessionClass)
 		runExplanation := physics.ExplainRun(sessionClass, durability, formBreakdown, cadenceDropPct)
 		gapText := ""
+		gapConf := "n/a"
 		uphillPct := 0.0
 		brakeLoad := 0.0
 		rssPts := 0.0
 		rssSrc := ""
 		rssCal := 1.0
+		rssConf := "n/a"
 		if isRunSport(a.Sport) {
 			if g := physics.GradeAdjustedAvgPaceMinKm(a); !math.IsNaN(g) && g > 0 && g < 45 {
 				gapText = formatPaceFromMinPerKm(g)
 			}
+			gapConf = terrainConfidenceLabel(a, gapText != "")
 			uphillPct = physics.UphillTimeFraction(a, 2.0) * 100
 			brakeLoad = physics.DownhillBrakingLoad(a)
-			if settings.FTP > 1 && hasUsablePower(a.Power) {
-				rawRSS := physics.RunningSquaredPowerLoad(a.Power, a.TimeSec, settings.FTP)
+			if zoneRef > 1 && hasUsablePower(a.Power) {
+				rawRSS := physics.RunningSquaredPowerLoad(a.Power, a.TimeSec, zoneRef)
 				rssCal, rssSrc = rssCalibration(a)
 				rssPts = sanitizeRSS((rawRSS / 36.0) * rssCal)
+				rssConf = rssConfidenceLabel(a, rssPts > 0)
 			}
 		}
 		out = append(out, activitySummary{
@@ -1052,11 +1331,15 @@ func buildSummaries(activities []domain.Activity, settings provider.Settings) []
 			ZoneBasis:         basis,
 			HRZones:           hrZones,
 			GapPaceText:       gapText,
+			GapConfidence:     gapConf,
 			UphillTimePct:     uphillPct,
 			DownhillBrakeLoad: brakeLoad,
 			RSSPoints:         rssPts,
 			RSSSource:         rssSrc,
 			RSSCalibration:    rssCal,
+			RSSConfidence:     rssConf,
+			RefPowerW:         zoneRef,
+			RefPowerLabel:     refLabel,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Activity.StartTime.After(out[j].Activity.StartTime) })
@@ -1234,15 +1517,54 @@ func max(a, b int) int {
 func deriveZones(a domain.Activity, ftp float64, hrBounds [4]float64) ([5]float64, string) {
 	if hasUsablePower(a.Power) && len(a.Power) == len(a.TimeSec) {
 		if z, err := physics.TimeInPowerZonesMinutes(a.Power, a.TimeSec, ftp); err == nil {
-			return z, "Power"
+			if !powerZonesLookSaturated(z, a.Duration) {
+				return z, "Power"
+			}
+			if inferred := inferEffectiveFTP(a.Power, ftp); inferred > ftp*1.12 {
+				if zAdj, errAdj := physics.TimeInPowerZonesMinutes(a.Power, a.TimeSec, inferred); errAdj == nil && !powerZonesLookSaturated(zAdj, a.Duration) {
+					return zAdj, fmt.Sprintf("Power (auto FTP %.0fW)", inferred)
+				}
+			}
 		}
 	}
 	if len(a.HeartRate) == len(a.TimeSec) {
 		if z, err := physics.TimeInHeartRateZonesMinutesWithBounds(a.HeartRate, a.TimeSec, hrBounds); err == nil {
-			return z, "Heart Rate"
+			return z, "Heart Rate (power fallback)"
 		}
 	}
 	return [5]float64{}, "Unavailable"
+}
+
+func powerZonesLookSaturated(z [5]float64, dur time.Duration) bool {
+	total := totalZoneMinutes(z)
+	if total <= 1 || dur < 20*time.Minute {
+		return false
+	}
+	z5 := z[4] / total
+	z12 := (z[0] + z[1]) / total
+	return z5 >= 0.85 || z12 >= 0.9
+}
+
+func inferEffectiveFTP(power []float64, baseFTP float64) float64 {
+	if baseFTP <= 1 || len(power) < 20 {
+		return baseFTP
+	}
+	samples := make([]float64, 0, len(power))
+	for _, p := range power {
+		if p > 0 {
+			samples = append(samples, p)
+		}
+	}
+	if len(samples) < 20 {
+		return baseFTP
+	}
+	sort.Float64s(samples)
+	p85 := samples[int(0.85*float64(len(samples)-1))]
+	inferred := p85 * 0.95
+	if inferred < baseFTP {
+		return baseFTP
+	}
+	return math.Min(inferred, baseFTP*1.8)
 }
 
 func hasUsablePower(power []float64) bool {
@@ -1256,6 +1578,19 @@ func hasUsablePower(power []float64) bool {
 		}
 	}
 	return float64(nonZero)/float64(len(power)) > 0.7
+}
+
+func thresholdPowerForActivity(a domain.Activity, settings provider.Settings) float64 {
+	if isRunSport(a.Sport) && settings.RunThresholdPower > 1 {
+		return settings.RunThresholdPower
+	}
+	if settings.FTP > 1 {
+		return settings.FTP
+	}
+	if settings.RunThresholdPower > 1 {
+		return settings.RunThresholdPower
+	}
+	return settings.FTP
 }
 
 func formatPace(sport string, distanceKM float64, duration time.Duration) string {
@@ -1329,6 +1664,30 @@ func sessionVerdict(s activitySummary) string {
 	}
 }
 
+func renderClassificationRationale(s activitySummary) string {
+	total := totalZoneMinutes(s.Zones)
+	if total <= 0 {
+		return "insufficient zone data"
+	}
+	z1z2 := (s.Zones[0] + s.Zones[1]) / total * 100
+	z4z5 := (s.Zones[3] + s.Zones[4]) / total * 100
+	z3 := s.Zones[2] / total * 100
+	switch s.SessionClass {
+	case "recovery":
+		return fmt.Sprintf("low-intensity dominant (Z1-2 %.0f%%)", z1z2)
+	case "easy":
+		return fmt.Sprintf("aerobic distribution with controlled load (Z1-2 %.0f%%)", z1z2)
+	case "tempo":
+		return fmt.Sprintf("steady middle-zone work (Z3 %.0f%%)", z3)
+	case "threshold":
+		return fmt.Sprintf("high-intensity concentration (Z4-5 %.0f%%)", z4z5)
+	case "long":
+		return fmt.Sprintf("extended duration (%s) with sustainable intensity", s.Duration)
+	default:
+		return fmt.Sprintf("mixed intensity pattern (Z1-2 %.0f%%, Z3 %.0f%%, Z4-5 %.0f%%)", z1z2, z3, z4z5)
+	}
+}
+
 func renderRunningEconomy(s activitySummary) string {
 	txt := fmt.Sprintf(
 		"Running Economy\nAverage Cadence: %s spm\nCadence consistency (sd): %s spm\nCadence drop late run: %s\nVertical Oscillation: %s cm\nVertical Ratio: %s",
@@ -1370,7 +1729,7 @@ func renderTerrainLoadBlock(s activitySummary) string {
 	var b strings.Builder
 	b.WriteString("Terrain & running stress\n")
 	if s.GapPaceText != "" {
-		fmt.Fprintf(&b, "Grade-adjusted pace (modeled): %s\n", s.GapPaceText)
+		fmt.Fprintf(&b, "Grade-adjusted pace (modeled): %s [%s]\n", s.GapPaceText, s.GapConfidence)
 	}
 	if s.UphillTimePct >= 0.5 {
 		fmt.Fprintf(&b, "Uphill moving time (grade ≥ 2%%): %.0f%%\n", s.UphillTimePct)
@@ -1379,9 +1738,54 @@ func renderTerrainLoadBlock(s activitySummary) string {
 		fmt.Fprintf(&b, "Descent braking proxy (trend units): %.1f\n", s.DownhillBrakeLoad)
 	}
 	if s.RSSPoints > 0 {
-		fmt.Fprintf(&b, "RSS (∫ power² vs FTP-ref, TSS analog): %.0f (%s, cal %.2f)", s.RSSPoints, s.RSSSource, s.RSSCalibration)
+		fmt.Fprintf(&b, "RSS (∫ power² vs FTP-ref, TSS analog): %.0f (%s, cal %.2f) [%s]", s.RSSPoints, s.RSSSource, s.RSSCalibration, s.RSSConfidence)
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func terrainConfidenceLabel(a domain.Activity, gapOK bool) string {
+	if !gapOK {
+		return "low"
+	}
+	if len(a.AltitudeM) == 0 || len(a.TimeSec) < 2 {
+		return "low"
+	}
+	valid := 0
+	for _, h := range a.AltitudeM {
+		if !math.IsNaN(h) && h > 1e-3 {
+			valid++
+		}
+	}
+	ratio := float64(valid) / float64(len(a.AltitudeM))
+	switch {
+	case ratio >= 0.9 && a.Duration >= 25*time.Minute:
+		return "high"
+	case ratio >= 0.7:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func rssConfidenceLabel(a domain.Activity, hasRSS bool) string {
+	if !hasRSS || len(a.Power) == 0 || len(a.TimeSec) != len(a.Power) {
+		return "low"
+	}
+	nonZero := 0
+	for _, p := range a.Power {
+		if p > 0 {
+			nonZero++
+		}
+	}
+	ratio := float64(nonZero) / float64(len(a.Power))
+	switch {
+	case ratio >= 0.95 && a.Duration >= 20*time.Minute:
+		return "high"
+	case ratio >= 0.8:
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 func renderDurabilityBlock(s activitySummary) string {
@@ -1554,6 +1958,27 @@ func renderRunPerformanceSummary(summaries []activitySummary) string {
 	return fmt.Sprintf("Run performance:\n- Critical Speed: %s\n- D': %s\n- Avg EF(speed/HR): %s\n- Total TRIMP (loaded set): %.1f", csText, dPrimeText, efText, trimpSum)
 }
 
+func renderDurabilityTrend(summaries []activitySummary) string {
+	if len(summaries) == 0 {
+		return "Durability trend: no run data"
+	}
+	now := time.Now()
+	last14 := now.AddDate(0, 0, -14)
+	prev14 := now.AddDate(0, 0, -28)
+	curScore := avgRange(summaries, last14, now, "dur")
+	prevScore := avgRange(summaries, prev14, last14, "dur")
+	curDrift := avgRange(summaries, last14, now, "dec")
+	prevDrift := avgRange(summaries, prev14, last14, "dec")
+	curStab := avgRange(summaries, last14, now, "hrstab")
+	prevStab := avgRange(summaries, prev14, last14, "hrstab")
+	return fmt.Sprintf(
+		"Durability trend (last 14d vs prior 14d)\n- Durability score: %s\n- Decoupling: %s\n- HR stability: %s",
+		trendText(curScore, prevScore, false),
+		trendText(curDrift, prevDrift, true),
+		trendText(curStab, prevStab, false),
+	)
+}
+
 func zoneLegend() string {
 	return mutedStyle.Render("Legend: Z1 easy | Z2 endurance | Z3 tempo | Z4 threshold | Z5 VO2+")
 }
@@ -1700,6 +2125,10 @@ func avgRange(summaries []activitySummary, start, end time.Time, metric string) 
 			v = s.TRIMP
 		case "dec":
 			v = s.Decoupling
+		case "dur":
+			v = s.DurabilityScore
+		case "hrstab":
+			v = s.HRStabilityPct
 		}
 		if v > 0 {
 			sum += v

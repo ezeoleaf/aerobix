@@ -8,6 +8,8 @@
 //	      data.json        # Strava tokens + athlete settings (was strava.json)
 //	      cache.json       # activity cache (was activities_cache.json)
 //	      garmin/          # default FIT import folder (created empty)
+//	      coros/           # default Coros FIT import folder
+//	      polar/           # default Polar FIT import folder
 //
 // Legacy files strava.json + activities_cache.json at aerobix root are migrated
 // into profiles/default/ on first run.
@@ -30,6 +32,8 @@ const (
 	dataFile      = "data.json"
 	cacheFile     = "cache.json"
 	garminDir     = "garmin"
+	corosDir      = "coros"
+	polarDir      = "polar"
 )
 
 type appConfig struct {
@@ -110,6 +114,12 @@ func MigrateLegacy() error {
 	if err := os.MkdirAll(pathpkg.Join(defaultProfile, garminDir), 0o755); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(pathpkg.Join(defaultProfile, corosDir), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(pathpkg.Join(defaultProfile, polarDir), 0o755); err != nil {
+		return err
+	}
 	newData := pathpkg.Join(defaultProfile, dataFile)
 	newCache := pathpkg.Join(defaultProfile, cacheFile)
 
@@ -127,6 +137,12 @@ func MigrateLegacy() error {
 func bootstrapFresh(root string) error {
 	defaultProfile := pathpkg.Join(root, profilesDir, "default")
 	if err := os.MkdirAll(pathpkg.Join(defaultProfile, garminDir), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(pathpkg.Join(defaultProfile, corosDir), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(pathpkg.Join(defaultProfile, polarDir), 0o755); err != nil {
 		return err
 	}
 	ac := appConfig{ActiveProfile: "default"}
@@ -269,13 +285,37 @@ func GarminDir(profileID string) (string, error) {
 	return pathpkg.Join(dir, garminDir), nil
 }
 
-// EnsureProfileDirs creates profile folder + garmin subfolder.
+// CorosDir returns the default Coros FIT directory for a profile.
+func CorosDir(profileID string) (string, error) {
+	dir, err := ProfileDir(profileID)
+	if err != nil {
+		return "", err
+	}
+	return pathpkg.Join(dir, corosDir), nil
+}
+
+// PolarDir returns the default Polar FIT directory for a profile.
+func PolarDir(profileID string) (string, error) {
+	dir, err := ProfileDir(profileID)
+	if err != nil {
+		return "", err
+	}
+	return pathpkg.Join(dir, polarDir), nil
+}
+
+// EnsureProfileDirs creates profile folder + vendor FIT subfolders.
 func EnsureProfileDirs(profileID string) error {
 	dir, err := ProfileDir(profileID)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(pathpkg.Join(dir, garminDir), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(pathpkg.Join(dir, corosDir), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(pathpkg.Join(dir, polarDir), 0o755); err != nil {
 		return err
 	}
 	return os.MkdirAll(dir, 0o755)

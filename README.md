@@ -138,10 +138,12 @@ Data lives under an OS-specific config directory as **`…/aerobix/`** (JSON on 
   - `data.json` — Strava tokens + athlete settings (FTP, zones, etc.)
   - `cache.json` — cached Strava activities
   - `garmin/` — default folder for FIT import when “Garmin FIT dir” is left at the default
+  - `coros/` — default Coros FIT folder
+  - `polar/` — default Polar FIT folder
 
 Each profile has its own `data.json`, so **OAuth tokens (and thus the linked Strava athlete) are per profile**. You can reuse the same Strava API app (Client ID/Secret) for every profile; run **OAuth (`a` / `x`) again** after switching to a profile when you want that profile to use a different Strava account.
 
-Optional Coros/Polar (future) can mirror Garmin as extra subfolders under the same profile, e.g. `profiles/alice/coros/`.
+Coros/Polar now use separate profile subfolders by default (`profiles/<id>/coros/`, `profiles/<id>/polar/`).
 
 **New profile:** on **Settings**, press **`n`**, type an id, **Enter** — Aerobix creates `profiles/<id>/` and switches to it (no manual folder needed).
 

@@ -25,21 +25,27 @@ const (
 )
 
 type config struct {
-	AthleteName  string  `json:"athlete_name"`
-	FTP          float64 `json:"ftp"`
-	Age          int     `json:"age"`
-	MaxHeartRate float64 `json:"max_heart_rate"`
-	HRZone1Max   float64 `json:"hr_zone_1_max"`
-	HRZone2Max   float64 `json:"hr_zone_2_max"`
-	HRZone3Max   float64 `json:"hr_zone_3_max"`
-	HRZone4Max   float64 `json:"hr_zone_4_max"`
-	GarminFITDir string  `json:"garmin_fit_dir"`
-	RunOnly      bool    `json:"run_only"`
-	ClientID     string  `json:"client_id"`
-	ClientSecret string  `json:"client_secret"`
-	AccessToken  string  `json:"access_token"`
-	RefreshToken string  `json:"refresh_token"`
-	ExpiresAt    int64   `json:"expires_at"`
+	AthleteName       string  `json:"athlete_name"`
+	FTP               float64 `json:"ftp"`
+	RunThresholdPower float64 `json:"run_threshold_power"`
+	Age               int     `json:"age"`
+	MaxHeartRate      float64 `json:"max_heart_rate"`
+	HRZone1Max        float64 `json:"hr_zone_1_max"`
+	HRZone2Max        float64 `json:"hr_zone_2_max"`
+	HRZone3Max        float64 `json:"hr_zone_3_max"`
+	HRZone4Max        float64 `json:"hr_zone_4_max"`
+	GarminFITDir      string  `json:"garmin_fit_dir"`
+	CorosFITDir       string  `json:"coros_fit_dir"`
+	PolarFITDir       string  `json:"polar_fit_dir"`
+	AIProviderType    string  `json:"ai_provider_type"`
+	AIAPIKey          string  `json:"ai_api_key"`
+	AIBaseURL         string  `json:"ai_base_url"`
+	RunOnly           bool    `json:"run_only"`
+	ClientID          string  `json:"client_id"`
+	ClientSecret      string  `json:"client_secret"`
+	AccessToken       string  `json:"access_token"`
+	RefreshToken      string  `json:"refresh_token"`
+	ExpiresAt         int64   `json:"expires_at"`
 }
 
 type Provider struct {
@@ -80,9 +86,10 @@ func newProviderForID(pid string) (Provider, error) {
 		cachePath: cachePath,
 		http:      &http.Client{Timeout: 20 * time.Second},
 		cfg: config{
-			AthleteName: "Hacker Athlete",
-			FTP:         265,
-			Age:         30,
+			AthleteName:       "Hacker Athlete",
+			FTP:               265,
+			RunThresholdPower: 0,
+			Age:               30,
 		},
 	}
 	_ = p.load()
@@ -100,20 +107,26 @@ func (p Provider) AthleteProfile() domain.AthleteProfile {
 
 func (p Provider) Settings() provider.Settings {
 	return provider.Settings{
-		AthleteName:  p.cfg.AthleteName,
-		FTP:          p.cfg.FTP,
-		Age:          p.cfg.Age,
-		MaxHeartRate: p.cfg.MaxHeartRate,
-		HRZone1Max:   p.cfg.HRZone1Max,
-		HRZone2Max:   p.cfg.HRZone2Max,
-		HRZone3Max:   p.cfg.HRZone3Max,
-		HRZone4Max:   p.cfg.HRZone4Max,
-		GarminFITDir: p.effectiveGarminFITDir(),
-		RunOnly:      p.cfg.RunOnly,
-		ClientID:     p.cfg.ClientID,
-		ClientSecret: p.cfg.ClientSecret,
-		Configured:   p.cfg.ClientID != "" && p.cfg.ClientSecret != "",
-		Connected:    p.cfg.AccessToken != "",
+		AthleteName:       p.cfg.AthleteName,
+		FTP:               p.cfg.FTP,
+		RunThresholdPower: p.cfg.RunThresholdPower,
+		Age:               p.cfg.Age,
+		MaxHeartRate:      p.cfg.MaxHeartRate,
+		HRZone1Max:        p.cfg.HRZone1Max,
+		HRZone2Max:        p.cfg.HRZone2Max,
+		HRZone3Max:        p.cfg.HRZone3Max,
+		HRZone4Max:        p.cfg.HRZone4Max,
+		GarminFITDir:      p.effectiveGarminFITDir(),
+		CorosFITDir:       p.effectiveCorosFITDir(),
+		PolarFITDir:       p.effectivePolarFITDir(),
+		AIProviderType:    p.cfg.AIProviderType,
+		AIAPIKey:          p.cfg.AIAPIKey,
+		AIBaseURL:         p.cfg.AIBaseURL,
+		RunOnly:           p.cfg.RunOnly,
+		ClientID:          p.cfg.ClientID,
+		ClientSecret:      p.cfg.ClientSecret,
+		Configured:        p.cfg.ClientID != "" && p.cfg.ClientSecret != "",
+		Connected:         p.cfg.AccessToken != "",
 	}
 }
 
@@ -124,6 +137,7 @@ func (p Provider) FetchInfo() provider.FetchInfo {
 func (p *Provider) UpdateSettings(s provider.Settings) error {
 	p.cfg.AthleteName = s.AthleteName
 	p.cfg.FTP = s.FTP
+	p.cfg.RunThresholdPower = s.RunThresholdPower
 	p.cfg.Age = s.Age
 	p.cfg.MaxHeartRate = s.MaxHeartRate
 	p.cfg.HRZone1Max = s.HRZone1Max
@@ -137,6 +151,23 @@ func (p *Provider) UpdateSettings(s provider.Settings) error {
 	} else {
 		p.cfg.GarminFITDir = g
 	}
+	defCoros, _ := paths.CorosDir(p.profileID)
+	c := strings.TrimSpace(s.CorosFITDir)
+	if c == defCoros {
+		p.cfg.CorosFITDir = ""
+	} else {
+		p.cfg.CorosFITDir = c
+	}
+	defPolar, _ := paths.PolarDir(p.profileID)
+	pl := strings.TrimSpace(s.PolarFITDir)
+	if pl == defPolar {
+		p.cfg.PolarFITDir = ""
+	} else {
+		p.cfg.PolarFITDir = pl
+	}
+	p.cfg.AIProviderType = strings.TrimSpace(strings.ToLower(s.AIProviderType))
+	p.cfg.AIAPIKey = strings.TrimSpace(s.AIAPIKey)
+	p.cfg.AIBaseURL = strings.TrimSpace(s.AIBaseURL)
 	p.cfg.RunOnly = s.RunOnly
 	p.cfg.ClientID = strings.TrimSpace(s.ClientID)
 	p.cfg.ClientSecret = strings.TrimSpace(s.ClientSecret)
@@ -148,6 +179,28 @@ func (p Provider) effectiveGarminFITDir() string {
 		return p.cfg.GarminFITDir
 	}
 	g, err := paths.GarminDir(p.profileID)
+	if err != nil {
+		return ""
+	}
+	return g
+}
+
+func (p Provider) effectiveCorosFITDir() string {
+	if strings.TrimSpace(p.cfg.CorosFITDir) != "" {
+		return p.cfg.CorosFITDir
+	}
+	g, err := paths.CorosDir(p.profileID)
+	if err != nil {
+		return ""
+	}
+	return g
+}
+
+func (p Provider) effectivePolarFITDir() string {
+	if strings.TrimSpace(p.cfg.PolarFITDir) != "" {
+		return p.cfg.PolarFITDir
+	}
+	g, err := paths.PolarDir(p.profileID)
 	if err != nil {
 		return ""
 	}
@@ -487,7 +540,11 @@ func (p *Provider) load() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(b, &p.cfg)
+	if err := json.Unmarshal(b, &p.cfg); err != nil {
+		return err
+	}
+	p.applyAIConfigYAMLOverride()
+	return nil
 }
 
 func (p *Provider) save() error {
@@ -499,6 +556,44 @@ func (p *Provider) save() error {
 		return err
 	}
 	return os.WriteFile(p.cfgPath, b, 0o600)
+}
+
+func (p *Provider) applyAIConfigYAMLOverride() {
+	root, err := paths.AerobixDir()
+	if err != nil {
+		return
+	}
+	yamlPath := filepath.Join(root, "config.yaml")
+	b, err := os.ReadFile(yamlPath)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" || strings.HasPrefix(s, "#") {
+			continue
+		}
+		parts := strings.SplitN(s, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(parts[0]))
+		v := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		switch k {
+		case "provider_type", "ai_provider_type":
+			if v != "" {
+				p.cfg.AIProviderType = v
+			}
+		case "api_key", "ai_api_key":
+			if v != "" {
+				p.cfg.AIAPIKey = v
+			}
+		case "base_url", "ai_base_url":
+			if v != "" {
+				p.cfg.AIBaseURL = v
+			}
+		}
+	}
 }
 
 type activitiesCache struct {

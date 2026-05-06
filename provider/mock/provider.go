@@ -42,13 +42,19 @@ func (p Provider) RecentActivities(limit int, _ bool) ([]domain.Activity, error)
 
 func (p Provider) Settings() provider.Settings {
 	return provider.Settings{
-		AthleteName:  "Hacker Athlete",
-		FTP:          265,
-		Age:          30,
-		GarminFITDir: "",
-		RunOnly:      false,
-		Configured:   true,
-		Connected:    true,
+		AthleteName:       "Hacker Athlete",
+		FTP:               265,
+		RunThresholdPower: 300,
+		Age:               30,
+		GarminFITDir:      "",
+		CorosFITDir:       "",
+		PolarFITDir:       "",
+		AIProviderType:    "ollama",
+		AIAPIKey:          "",
+		AIBaseURL:         "http://localhost:11434",
+		RunOnly:           false,
+		Configured:        true,
+		Connected:         true,
 	}
 }
 

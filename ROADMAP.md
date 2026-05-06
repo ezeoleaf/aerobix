@@ -21,13 +21,13 @@
 
 ## Near Term
 
-- [ ] Add unit tests for key metric engines (`NP`, `TSS`, `Decoupling`, `Durability`, `Classification`, load analytics)
-- [ ] Surface classification confidence details (“why this label”)
+- [~] Add unit tests for key metric engines (`NP`, `TSS`, `Decoupling`, `Durability`, `Classification`, load analytics) — baseline tests added for `NP`, `TSS`, and load analytics; expand coverage next
+- [x] Surface classification confidence details (“why this label”)
 - [ ] Configurable classification thresholds in Settings (run vs trail)
-- [ ] Hot profile switch (reload provider without restarting the app)
-- [ ] Durability trend view across recent runs
-- [ ] Add support for Coros (reuse FIT folder under profile)
-- [ ] Add support for Polar (reuse FIT folder under profile)
+- [x] Hot profile switch (reload provider without restarting the app)
+- [x] Durability trend view across recent runs
+- [x] Add support for Coros (separate `coros/` FIT folder under profile)
+- [x] Add support for Polar (separate `polar/` FIT folder under profile)
 
 ## Mid Term
 
