@@ -178,6 +178,7 @@ type Model struct {
 	aiViewport viewport.Model
 	aiHistory  []ai.CoachMessage
 	aiBusy     bool
+	aiCompose  bool
 }
 
 func NewModel(dataProvider provider.DataProvider, fitNotify chan<- tea.Msg) Model {
@@ -270,7 +271,10 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.dispatchUpdate(msg)
 	mm := next.(Model)
-	if !mm.profilePickerOpen && !mm.createProfileOpen && !mm.editMode {
+	if navItems[mm.navCursor] == "AI Insights" {
+		mm.aiViewport.SetContent(mm.renderAIConversation())
+	}
+	if !mm.profilePickerOpen {
 		mm.mainViewport.SetContent(mm.renderScrollableMainBody())
 	}
 	return mm, cmd
@@ -605,8 +609,10 @@ func (m Model) handleEditKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleAIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.aiViewport.SetContent(m.renderAIConversation())
-	m.aiViewport, _ = m.aiViewport.Update(msg)
+	if !m.aiCompose {
+		m.aiViewport.SetContent(m.renderAIConversation())
+		m.aiViewport, _ = m.aiViewport.Update(msg)
+	}
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
@@ -619,8 +625,30 @@ func (m Model) handleAIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.navCursor < len(navItems)-1 {
 			m.navCursor++
 		}
+		m.aiCompose = false
+		m.aiInput.Blur()
+		return m, nil
+	case "i":
+		if m.aiBusy {
+			return m, nil
+		}
+		m.aiCompose = true
+		m.aiInput.Focus()
+		m.status = "AI compose mode: type your question, Enter send, Esc cancel."
+		return m, nil
+	case "esc":
+		if m.aiCompose {
+			m.aiCompose = false
+			m.aiInput.Blur()
+			m.aiInput.SetValue("")
+			m.status = "AI message canceled."
+			return m, nil
+		}
 		return m, nil
 	case "enter":
+		if !m.aiCompose {
+			return m, nil
+		}
 		if m.aiBusy {
 			return m, nil
 		}
@@ -632,11 +660,16 @@ func (m Model) handleAIKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			q = "Give me a summary of my current training state and recommendations for the week."
 		}
 		m.aiInput.SetValue("")
+		m.aiCompose = false
+		m.aiInput.Blur()
 		m.aiHistory = append(m.aiHistory, ai.CoachMessage{Role: "user", Content: q})
 		m.aiBusy = true
 		m.aiViewport.SetContent(m.renderAIConversation())
 		m.aiViewport.GotoBottom()
 		return m, m.askCoachCmd(q)
+	}
+	if !m.aiCompose {
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.aiInput, cmd = m.aiInput.Update(msg)
@@ -697,7 +730,7 @@ func (m Model) renderHeaderTabs() string {
 
 func (m Model) renderFooter() string {
 	w := max(20, m.width-chromeAppPadH)
-	keys := "h/l tabs · j/k lists · AI: Enter send /report · P profiles · r Strava · g Garmin · p dash · PgUp/PgDn scroll · Ctrl+u/d · wheel · q quit"
+	keys := "h/l tabs · j/k lists · AI: i compose, Esc cancel, Enter send, /report · P profiles · r Strava · g Garmin · p dash · PgUp/PgDn scroll · Ctrl+u/d · wheel · q quit"
 	line1 := ansi.Truncate(keys, w, "…")
 	st := strings.TrimSpace(m.status)
 	if st == "" {
@@ -730,12 +763,37 @@ func (m Model) renderScrollableMainBody() string {
 
 func (m Model) renderAIInsights() string {
 	head := titleStyle.Render("AI Insights")
-	hint := mutedStyle.Render("Coach persona · Enter send · /report weekly summary")
-	in := m.aiInput.View()
+	chip := subtleBoxStyle.Render(m.renderAIStatusLine())
+	hint := mutedStyle.Render("Coach persona · i compose · Enter send · Esc cancel · /report weekly summary")
+	in := mutedStyle.Render("Press i to compose a message.")
+	if m.aiCompose {
+		in = m.aiInput.View()
+	}
 	if m.aiBusy {
 		in = mutedStyle.Render("Coach is thinking...")
 	}
-	return head + "\n\n" + hint + "\n\n" + m.aiViewport.View() + "\n\n" + in
+	return head + "\n\n" + chip + "\n\n" + hint + "\n\n" + m.aiViewport.View() + "\n\n" + in
+}
+
+func (m Model) renderAIStatusLine() string {
+	provider := strings.ToLower(strings.TrimSpace(m.settings.AIProviderType))
+	if provider == "" {
+		provider = "ollama"
+	}
+	model := "llama3.1"
+	switch provider {
+	case "openai":
+		model = "gpt-5.4-mini"
+	case "anthropic", "claude":
+		model = "claude-sonnet-4.5"
+	}
+	state := "idle"
+	if m.aiBusy {
+		state = "thinking"
+	} else if m.aiCompose {
+		state = "composing"
+	}
+	return fmt.Sprintf("Provider: %s | Model: %s | State: %s", provider, model, state)
 }
 
 var spinnerFrames = []string{"|", "/", "-", "\\"}

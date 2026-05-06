@@ -52,7 +52,7 @@ func (p OpenAIProvider) Chat(prompt string) (string, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("openai request failed: %s", resp.Status)
+		return "", providerHTTPError("openai", resp.StatusCode, resp.Status, body)
 	}
 	var out struct {
 		OutputText string `json:"output_text"`
@@ -116,7 +116,8 @@ func (p LocalOllamaProvider) Chat(prompt string) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("ollama request failed: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return "", providerHTTPError("ollama", resp.StatusCode, resp.Status, body)
 	}
 	var out struct {
 		Message struct {
@@ -178,7 +179,7 @@ func (p AnthropicProvider) Chat(prompt string) (string, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("anthropic request failed: %s", resp.Status)
+		return "", providerHTTPError("anthropic", resp.StatusCode, resp.Status, body)
 	}
 	var out struct {
 		Content []struct {
@@ -195,4 +196,21 @@ func (p AnthropicProvider) Chat(prompt string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("anthropic response had no text")
+}
+
+func providerHTTPError(provider string, statusCode int, status string, body []byte) error {
+	msg := strings.TrimSpace(string(body))
+	if len(msg) > 240 {
+		msg = msg[:240] + "..."
+	}
+	if statusCode == http.StatusTooManyRequests {
+		if msg == "" {
+			msg = "quota or rate limit reached"
+		}
+		return fmt.Errorf("%s 429 rate limit: %s. Wait/retry, or switch AI provider.", provider, msg)
+	}
+	if msg == "" {
+		return fmt.Errorf("%s request failed: %s", provider, status)
+	}
+	return fmt.Errorf("%s request failed: %s (%s)", provider, status, msg)
 }
