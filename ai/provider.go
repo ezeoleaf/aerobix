@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -49,7 +50,13 @@ func (p OpenAIProvider) Chat(prompt string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
 		return "", providerHTTPError("openai", resp.StatusCode, resp.Status, body)
@@ -114,7 +121,11 @@ func (p LocalOllamaProvider) Chat(prompt string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Fatal(err)
+		}
+	}()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		return "", providerHTTPError("ollama", resp.StatusCode, resp.Status, body)
@@ -176,7 +187,11 @@ func (p AnthropicProvider) Chat(prompt string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Fatal(err)
+		}
+	}()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
 		return "", providerHTTPError("anthropic", resp.StatusCode, resp.Status, body)
@@ -207,7 +222,7 @@ func providerHTTPError(provider string, statusCode int, status string, body []by
 		if msg == "" {
 			msg = "quota or rate limit reached"
 		}
-		return fmt.Errorf("%s 429 rate limit: %s. Wait/retry, or switch AI provider.", provider, msg)
+		return fmt.Errorf("%s 429 rate limit: %s. Wait/retry, or switch AI provider", provider, msg)
 	}
 	if msg == "" {
 		return fmt.Errorf("%s request failed: %s", provider, status)
